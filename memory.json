@@ -1,0 +1,19 @@
+{
+  "facts": [],
+  "networks": {
+    "shalom1": {
+      "bssid": "00:f8:cc:c0:ce:f0"
+    },
+    "4": {
+      "bssid": "00:f8:cc:c0:ce:f3"
+    },
+    "Ren1993": {
+      "bssid": "00:f8:cc:c0:55:80"
+    },
+    "kevin": {
+      "bssid": "da:d8:e5:b0:0b:6f"
+    }
+  },
+  "credentials": {},
+  "notes": []
+}
