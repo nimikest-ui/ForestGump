@@ -1,298 +1,100 @@
-# Bare Metal Agent — Workspace Instructions
+# Bare Metal Agent — ForestGump
 
-This is a **minimal, anti-framework LLM agent** for security tasks. No tool abstractions, no playbooks — just a model and a raw bash shell with safety guards.
+Minimalist AI pentesting agent: one LLM + one raw bash PTY + safety guards. No tool abstractions, no playbooks.
 
-## Core Principles
-
-1. **Single responsibility**: Agent sends one command at a time to bash  
-2. **Safety-first**: Dangerous patterns blocked at regex level (wlan0, rm -rf, reboot, etc.)  
-3. **Memory systems**: Persistent facts, networks, credentials, and proven techniques across sessions  
-4. **Multi-provider**: Claude CLI (OAuth), Ollama (local/cloud), Anthropic API  
-5. **Session resumption**: Save/restore conversation state mid-task  
+See [CLAUDE.md](../CLAUDE.md) for full architecture, data flow, and design decisions.
 
 ## Quick Start
 
-### Run the agent (direct mode, no prompts)
-
 ```bash
-# Claude CLI (uses Pro subscription, no API key)
-python agent.py --provider claude "scan wifi networks on wlan1"
-
-# Ollama local (uses http://localhost:11434)
-python agent.py --provider ollama --model llama3.2:latest "enumerate nearby networks"
-
-# Ollama Cloud (requires OLLAMA_API_KEY from ollama.com/settings/keys)
-OLLAMA_API_KEY=<key> python agent.py --provider ollama --model qwen3.5:397b-cloud "next bandit challenge"
-
-# Anthropic API (requires ANTHROPIC_API_KEY)
-ANTHROPIC_API_KEY=<key> python agent.py --provider anthropic "task here"
-```
-
-### Run the agent (interactive menu)
-
-```bash
-# New task with menu navigation (uses arrow keys, numbers, Enter to select)
+# Interactive menu (arrow keys, select provider/model/task)
 python menu.py
 
-# Direct execution with args (no confirmations, fastest)
-python menu.py --provider ollama --model llama3.2:latest "your task"
+# Direct run — no prompts
+python agent.py --provider claude "scan wifi networks on wlan1"
+python agent.py --provider ollama --model llama3.2:latest "enumerate nearby networks"
+OLLAMA_API_KEY=<key> python agent.py --provider ollama --model glm-5.1-cloud "bandit challenge"
+ANTHROPIC_API_KEY=<key> python agent.py --provider anthropic "task here"
 
-# Resume a previous session
+# Session management
+python agent.py --list-sessions
 python agent.py --resume sessions/20260422_020023.json
-
-# Resume and give new follow-up task
 python agent.py --resume sessions/20260422_020023.json "now try bandit10"
 ```
 
-## Memory Systems
+## File Map
 
-### 1. Persistent Facts (`memory.json`)
+| File | Purpose |
+|------|---------|
+| `agent.py` | Core loop: PTY shell, providers, safety, memory, sessions |
+| `menu.py` | Interactive CLI wrapper (arrow keys, 30+ models) |
+| `skills.py` | Skill DB API — CRUD, FTS5 search, LLM extraction |
+| `skills.db` | SQLite FTS5 database; auto-grows each session (primary) |
+| `techniques.json` | Legacy technique store; migrated into `skills.db` on startup |
+| `memory.json` | Cross-session facts, networks, credentials, notes |
+| `sessions/` | Per-run JSON logs with full conversation + memory state |
 
-Auto-detected across sessions:
-- **Networks**: WiFi SSIDs, BSSIDs, encryption, channels
-- **Credentials**: Passwords, WPA PSKs, pins (auto-extracted from output)  
-- **Facts**: Important findings, landmarks, learnings
-- **Notes**: Manual session notes
+## Safety Rules (agent.py lines 64–102)
 
-**Load automatically** in system prompt each agent invocation.
+**Hard rule**: any command containing `wlan0` is unconditionally blocked.
 
-### 2. Technique Library (`techniques.json`)
-
-Proven approaches that work — shown to model on Turn 1:
-- **SSH via Paramiko base64**: Discovered in bandit challenge (Turn 18 → Turn 2)  
-- **sshpass automation**: Alternative SSH method
-- **Base64 encoding**: General obfuscation for blocked patterns
-
-**Format**:
-```json
-{
-  "techniques": {
-    "ssh_paramiko_base64": {
-      "name": "SSH via Paramiko + base64",
-      "problem": "Direct ssh commands blocked by PTY safety",
-      "solution": "Encode paramiko script in base64, decode and execute",
-      "template": "base64 -d <<< 'CODE' | python3",
-      "tags": ["ssh", "paramiko", "obfuscation"],
-      "success_rate": "high"
-    }
-  }
-}
-```
-
-**Update manually** after successful agent sessions:
-1. Run agent, discover new technique
-2. Edit `techniques.json`, add new entry
-3. Next agent run shows technique immediately (saves ~17 turns)
-
-## Safety System  
-
-**Blocked commands** are regex-matched before execution. The agent sees feedback:
-```
-Command BLOCKED (dangerous: reason). Try a different approach.
-```
-
-### Current patterns (25+ total)
+Regex-blocked patterns (edit `DANGEROUS_PATTERNS` to change):
 
 | Pattern | Reason |
 |---------|--------|
-| `wlan0` (anywhere) | wlan0 is protected (network interface) |
-| `ssh user@host` | Interactive SSH hangs PTY → use `sshpass` or `paramiko` |
-| `telnet` | Interactive, same as SSH |
-| `rm -r /` | Recursive file deletion |
-| `dd of=/` | Disk writes |
-| `reboot`, `shutdown` | System reboot/shutdown |
-| `airmon-ng` | airmon-ng not needed; wlan1 already monitor mode |
-| `rfcomm`, `gatttool`, etc. | Bluetooth tools that hang PTY |
+| `rm -r` / `rm /` | Recursive/absolute deletion |
+| `mkfs`, `dd of=/` | Disk format/overwrite |
+| `reboot`, `shutdown`, `poweroff` | System shutdown |
+| `systemctl stop/disable/mask` | Disable services |
+| `airmon-ng` | Forbidden — wlan1 is already in monitor mode |
+| `rfcomm`, `gatttool`, `l2ping`, etc. | Bluetooth tools that hang PTY |
+| `wlan0` (hard rule) | Protected primary interface |
 
-**Exception**: `sshpass -p 'pass' ssh host 'command'` is **allowed** (non-interactive).
+**SSH/telnet**: currently **not blocked** (was previously commented out). Direct `ssh` may hang the PTY — prefer `sshpass -p 'pass' ssh user@host 'command'` for non-interactive runs.
 
-### How to unblock
+**Sanitizer**: background patterns (`cmd & ; sleep N && kill`) are auto-rewritten to `timeout N cmd`. Max timeout is capped at 35s.
 
-If a command is incorrectly blocked, edit `agent.py` lines 83-102 (DANGEROUS_PATTERNS).  
-Pattern format: `(r'regex', 'reason_message')`
+To unblock a pattern: comment out the matching line in `DANGEROUS_PATTERNS`, then test with `--no-confirm`.
 
-**Example: Allow a new tool**
-```python
-# Remove or comment this line
-(r'\btool_name\b', 'reason'),
-```
+## Skills System
 
-Then commit and test with next agent run.
-
-## Architecture
+Skills are learned automatically from successful sessions and injected into Turn 1 of future runs.
 
 ```
-agent.py          ← Main loop: Shell → Provider → Parse → Memory → Save
-├─ Shell class    ← Raw PTY, command execution, Ctrl+C recovery
-├─ Providers      ← Claude CLI, Ollama, Anthropic (abstracted)
-├─ Safety         ← is_dangerous() regex checker
-├─ Memory         ← Load/save facts, networks, credentials
-├─ Techniques     ← Load/format proven approaches  
-└─ Sessions       ← Save/resume conversation state
-
-menu.py           ← Interactive CLI (arrow keys, numbers, Enter)
-├─ Provider selector (10+ models)
-├─ Model selector (30+ models via Ollama)
-├─ Task entry
-└─ Direct execution (no confirmations)
-
-sessions/         ← Per-task execution logs (JSON)
-20260422_020023.json
-├─ Task description
-├─ Provider + model
-├─ Full conversation (user/assistant messages)
-├─ Execution log (turn-by-turn)
-├─ Memory state (facts, networks, creds)
-└─ Timestamp
-
-memory.json       ← Cross-session learnings (updated each session)
-techniques.json   ← Proven techniques (manually added)
+Session ends → LLM extracts reusable skills → saved to skills.db (FTS5)
+Next session  → top 5 matching skills → injected into system prompt
 ```
 
-## Common Workflows
+- **Search**: `skills.py:search_skills(query)` — FTS5 full-text over name/problem/solution/template/tags
+- **Migrate**: `migrate_techniques_json()` runs on startup to import legacy `techniques.json` entries
+- See [SKILLS_README.md](../SKILLS_README.md) for the full DB schema and API reference
 
-### Security Task (Bandit, CTF, Network Test)
+## Memory System
 
-1. **First run**: `python menu.py` → Select provider/model → Task → Auto-saved
-2. **View result**: Session JSON shows full trace (messages, output, reasoning)
-3. **Add technique if successful**: Edit `techniques.json`, commit to git  
-4. **Next similar task**: Agent sees technique on Turn 1 (~90% reduction in turns)
+`memory.json` — persists across all sessions:
+- **facts** (cap 20): key findings, e.g. `"WPA2 cracked on Fiber-4k"`
+- **networks**: `{ssid: {bssid, channel, security}}`
+- **credentials**: `{target: {username, password, method}}`
+- **notes** (cap 10): manual insights
 
-### Resume a Challenge
+LLM sees this as a text block every turn. After each turn, `[MEMORY UPDATE]` tags in the response are parsed and merged.
+
+## Session Inspect
 
 ```bash
-# View recent sessions
-python agent.py --list-sessions
-
-# Resume with follow-up
-python agent.py --resume sessions/20260422_031120.json "continue to next bandit level"
+cat sessions/TIMESTAMP.json | python3 -m json.tool | grep -A2 '"role"'
+cat sessions/TIMESTAMP.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps(d['memory'], indent=2))"
 ```
 
-### Debug a Blocked Command
+## Adding a Provider
 
-```bash
-# Agent says "Command BLOCKED (dangerous: ...)"
-# Check what matched:
-grep "reason_substring" agent.py | head -1
+1. Create class with `.chat(messages, system) → str` in `agent.py`
+2. Wire into provider dispatcher (search `--provider` in `agent.py`)
+3. Test: `python agent.py --provider yourname "hello"`
 
-# If false positive, remove pattern, re-test
-# If intentional, use alternative approach (see techniques.json)
-```
+## Environment Variables
 
-## Configuration
-
-### Ollama Cloud
-
-```bash
-# 1. Get API key from https://ollama.com/settings/keys
-# 2. Export or pass as env var:
-export OLLAMA_API_KEY=your_key_here
-
-# 3. Use cloud models:
-python agent.py --provider ollama --model glm-5.1-cloud "task"
-```
-
-### Claude CLI (OAuth)
-
-```bash
-# 1. Install: npm install -g @anthropic-ai/claude
-# 2. Authenticate: claude login
-# 3. Uses your Pro subscription (no API key needed)
-python agent.py --provider claude "task"
-```
-
-### Anthropic API
-
-```bash
-# 1. Get key from https://console.anthropic.com/
-# 2. Export:
-export ANTHROPIC_API_KEY=sk-ant-...
-
-# 3. Use:
-python agent.py --provider anthropic "task"
-```
-
-## File Structure
-
-```
-.github/
-├─ copilot-instructions.md    ← This file
-└─ (future .instructions.md for specific workflows)
-
-agent.py                       ← 2000+ lines, core loop
-menu.py                        ← 350+ lines, interactive CLI
-techniques.json                ← Technique library (auto-loaded)
-memory.json                    ← Cross-session facts
-sessions/                      ← Session logs (auto-created)
-└─ 20260422_*.json             ← Per-execution conversation state
-```
-
-## Development Guidelines
-
-### Adding a New Provider
-
-Edit `agent.py` (lines 395-475):
-
-1. Create a new class `YourProvider` with `chat(messages, system)` method
-2. Add to provider dispatcher (search `--provider`)
-3. Test: `python agent.py --provider yourname --model mymodel "test"`
-
-### Adjusting Safety Rules
-
-Edit `agent.py` lines 83-102 (DANGEROUS_PATTERNS):
-
-```python
-DANGEROUS_PATTERNS = [
-    # Add new pattern:
-    (r'your_regex_here', 'human-readable reason'),
-    # Pattern format: raw string, so use r'...' not '...'
-    # Test with: python agent.py --no-confirm "test command"
-]
-```
-
-### Improving Memory Extraction
-
-Edit `extract_memory_updates()` (lines 475+). Currently auto-detects:
-- WPA PSK, WPS PIN, passwords from output  
-- BSSIDs with SSIDs
-- Extend with new regex patterns as needed
-
-## Session Persistence
-
-Each run saves to `sessions/TIMESTAMP.json`:
-
-```json
-{
-  "task": "bandit challenge description",
-  "provider": "ollama/qwen3.5:397b-cloud",
-  "turns": 19,
-  "messages": [{role, content}, ...],
-  "log": [{turn, type, cmd, output}, ...],
-  "memory": {facts, networks, credentials, notes},
-  "timestamp": "20260422_020023"
-}
-```
-
-**Use cases**:
-- **Fork session**: Load JSON, modify task, continue with new memory state
-- **Audit**: View exact model outputs, shell commands, and reasoning
-- **Resume**: `python agent.py --resume sessions/20260422_020023.json`
-
-## Known Limitations
-
-1. **Interactive tools hang PTY**: nmap, airmon-ng, some Bluetooth tools → use subprocess mode or timeout
-2. **PTY echo noise**: Some tools print extra output → regex-stripped automatically
-3. **Large responses timeout**: If model talks for 5+ min, reads truncated → summarize the task
-4. **SSH/telnet blocked**: By design (prevent interactive hangs) → use paramiko or sshpass
-
-## Next Steps for Development
-
-1. **Add MCP integrations** (e.g., for WiFi scanning APIs)
-2. **Implement auto-technique detection** (ML-based pattern extraction from successful sessions)
-3. **Multi-agent orchestration** (coordinator agent + specialist agents)
-4. **Custom providers** (e.g., local vLLM, Together API, etc.)
-
----
-
-**Last updated**: 2026-04-22  
-**Agent version**: v1.0 (bare metal, 25+ safety patterns, 3-provider support)
+| Variable | Required for |
+|----------|-------------|
+| `ANTHROPIC_API_KEY` | `--provider anthropic` |
+| `OLLAMA_API_KEY` | Ollama cloud models (`-cloud` suffix) |

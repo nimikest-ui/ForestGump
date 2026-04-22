@@ -342,6 +342,77 @@ class ClaudeCliProvider:
         return result.stdout.strip()
 
 
+class CopilotProvider:
+    """GitHub Copilot CLI provider.
+
+    Wraps `gh copilot -p` in non-interactive mode.
+    Shell/write tools are denied so Copilot CLI never executes commands
+    itself — ForestGump's own PTY loop stays in control.
+
+    Auth: uses existing `gh auth` session (no API key needed).
+    Install: curl -fsSL https://gh.io/copilot-install | bash
+    """
+
+    def __init__(self, model='claude-sonnet-4.5'):
+        self.model = model
+        self.name = f'copilot/{model}'
+
+    def chat(self, messages, system):
+        # Build a single prompt from conversation history (same pattern as ClaudeCliProvider)
+        prompt_parts = [f'[System instructions]\n{system}']
+        for msg in messages:
+            role = msg['role']
+            content = msg['content']
+            if role == 'user':
+                prompt_parts.append(content)
+            elif role == 'assistant':
+                prompt_parts.append(f'[Previous response]\n{content}')
+
+        full_prompt = '\n\n'.join(prompt_parts)
+        # Remove null bytes and other dangerous chars from prompt before passing to subprocess
+        full_prompt = full_prompt.replace('\x00', '').replace('\r\n', '\n')
+
+        cmd = [
+            'gh', 'copilot',
+            '--model', self.model,
+            '--output-format', 'text',
+            '--no-custom-instructions',  # ForestGump supplies its own system prompt above
+            '--deny-tool=shell',         # ForestGump's PTY executes commands, not Copilot CLI
+            '--deny-tool=write',         # Same — no file writes by Copilot CLI itself
+            '-p', full_prompt,
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=False,  # Get bytes first to handle encoding issues gracefully
+                timeout=180,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(f'Copilot CLI timeout (>180s)') from e
+        except Exception as e:
+            raise RuntimeError(f'Copilot CLI subprocess error: {e}') from e
+
+        if result.returncode != 0:
+            # Decode stderr/stdout carefully, replacing bad bytes
+            err_text = result.stderr.decode('utf-8', errors='replace').strip() if result.stderr else ''
+            out_text = result.stdout.decode('utf-8', errors='replace').strip() if result.stdout else ''
+            err_msg = (err_text or out_text or '(no error message)').replace('\x00', '')
+            raise RuntimeError(f'Copilot CLI error: {err_msg}')
+
+        # Decode output, aggressively removing null bytes and other problematic chars
+        try:
+            output = result.stdout.decode('utf-8', errors='replace').strip()
+        except Exception as e:
+            # Fallback: use latin-1 which accepts all byte values
+            output = result.stdout.decode('latin-1', errors='replace').strip()
+        
+        # Remove null bytes and control chars that cause issues downstream
+        output = ''.join(c for c in output if c not in '\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f')
+        return output
+
+
 # ─── Memory ───────────────────────────────────────────────────
 
 def load_memory():
@@ -980,7 +1051,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    ap.add_argument('--provider', choices=['claude', 'ollama', 'anthropic'], default='claude',
+    ap.add_argument('--provider', choices=['claude', 'ollama', 'anthropic', 'copilot'], default='claude',
                     help='Model provider (default: claude)')
     ap.add_argument('--model', help='Model name override')
     ap.add_argument('--host', help='Ollama host URL (default: http://localhost:11434)')
@@ -1012,6 +1083,8 @@ def main():
             print('❌ Set ANTHROPIC_API_KEY environment variable.')
             sys.exit(1)
         provider = AnthropicProvider(args.model or 'claude-sonnet-4-20250514')
+    elif args.provider == 'copilot':
+        provider = CopilotProvider(args.model or 'claude-sonnet-4.5')
     else:
         # Prefer local Ollama by default. Cloud is used if host is explicitly
         # set to ollama.com (or if host omitted but OLLAMA_API_KEY is present).

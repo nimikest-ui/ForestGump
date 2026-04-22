@@ -88,6 +88,23 @@ class MenuSystem:
                     'claude-sonnet-4-20250514': 'Claude Sonnet 4',
                     'claude-opus-4-1-20250805': 'Claude 3 Opus',
                 }
+            },
+            'copilot': {
+                'label': 'GitHub Copilot',
+                'desc': 'Copilot CLI — gh auth session, no API key needed',
+                'models': {
+                    'claude-sonnet-4.5': 'Claude Sonnet 4.5 \u2b50',
+                    'claude-sonnet-4.6': 'Claude Sonnet 4.6',
+                    'claude-sonnet-4': 'Claude Sonnet 4',
+                    'claude-haiku-4.5': 'Claude Haiku 4.5 • Fast',
+                    'gpt-5.4': 'GPT-5.4',
+                    'gpt-5.4-mini': 'GPT-5.4 Mini',
+                    'gpt-5-mini': 'GPT-5 Mini',
+                    'gpt-5.2': 'GPT-5.2',
+                    'gpt-5.3-codex': 'GPT-5.3 Codex • Code',
+                    'gpt-5.2-codex': 'GPT-5.2 Codex • Code',
+                    'gpt-4.1': 'GPT-4.1',
+                }
             }
         }
         self.history = self._load_history()
