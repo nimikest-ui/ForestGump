@@ -273,7 +273,11 @@ class AnthropicProvider:
             system=system,
             messages=messages,
         )
-        return r.content[0].text
+        usage = {
+            'input_tokens': r.usage.input_tokens,
+            'output_tokens': r.usage.output_tokens,
+        }
+        return r.content[0].text, usage
 
 
 class OllamaProvider:
@@ -296,7 +300,11 @@ class OllamaProvider:
     def chat(self, messages, system):
         msgs = [{'role': 'system', 'content': system}] + messages
         r = self.client.chat(self.model, messages=msgs)
-        return r['message']['content']
+        usage = {
+            'input_tokens': r.get('prompt_eval_count', 0),
+            'output_tokens': r.get('eval_count', 0),
+        }
+        return r['message']['content'], usage
 
 
 class ClaudeCliProvider:
@@ -340,7 +348,7 @@ class ClaudeCliProvider:
         if result.returncode != 0:
             raise RuntimeError(f'Claude CLI error: {result.stderr.strip()}')
 
-        return result.stdout.strip()
+        return result.stdout.strip(), None  # Claude CLI provides no token usage
 
 
 class CopilotProvider:
@@ -408,10 +416,10 @@ class CopilotProvider:
         except Exception as e:
             # Fallback: use latin-1 which accepts all byte values
             output = result.stdout.decode('latin-1', errors='replace').strip()
-        
+
         # Remove null bytes and control chars that cause issues downstream
         output = ''.join(c for c in output if c not in '\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f')
-        return output
+        return output, None  # Copilot CLI provides no token usage
 
 
 # ─── Memory ───────────────────────────────────────────────────
@@ -770,7 +778,7 @@ def build_resume_message(resume_data, task, mem=None):
 
 # ─── Session Persistence ─────────────────────────────────────
 
-def save_session(task, provider_name, turn_count, messages, log, mem, session_id=None):
+def save_session(task, provider_name, turn_count, messages, log, mem, token_totals=None, session_id=None):
     """Save full session state for resume."""
     SESSIONS_DIR.mkdir(exist_ok=True)
     ts = session_id or datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -783,6 +791,7 @@ def save_session(task, provider_name, turn_count, messages, log, mem, session_id
             'messages': messages,
             'log': log,
             'memory': mem,
+            'token_totals': token_totals or {},
             'timestamp': ts,
         }, f, indent=2)
     return str(session_file)
@@ -926,9 +935,24 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
         messages.append({'role': 'user', 'content': first_msg})
 
     try:
+        # Initialize token tracking
+        token_totals = {'input_tokens': 0, 'output_tokens': 0}
+
         for turn in range(1, max_turns + 1):
             turn_count = turn
             print(f'\n{"─"*25} Turn {turn} {"─"*25}')
+
+            # ── Between-turn steer check ──
+            # Non-blocking: picks up anything the user typed while last command ran.
+            if sys.stdin.isatty():
+                import select as _select
+                rlist, _, _ = _select.select([sys.stdin], [], [], 0)
+                if rlist:
+                    steer_line = sys.stdin.readline().strip()
+                    if steer_line:
+                        print(f'\n💬 Steering injected: {steer_line}')
+                        messages.append({'role': 'user', 'content': steer_line})
+                        log.append({'turn': turn, 'type': 'steer', 'content': steer_line, 'ts': time.time()})
 
             if turn >= next_review_turn:
                 review = build_round_review(turn, log, mem, task)
@@ -940,16 +964,23 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
             # ── LLM thinks ──
             t_llm_start = time.time()
             try:
-                response = provider.chat(messages, full_system)
+                response, usage = provider.chat(messages, full_system)
             except Exception as e:
                 print(f'\n❌ Provider error: {e}')
                 break
             t_thought = time.time()
             llm_inference = round(t_thought - t_llm_start, 1)
 
-            print(f'\n🤖 Agent: [llm={llm_inference}s]\n{response}')
+            # Accumulate token counts
+            if usage:
+                token_totals['input_tokens'] += usage.get('input_tokens', 0)
+                token_totals['output_tokens'] += usage.get('output_tokens', 0)
+
+            # Display agent response with token info
+            tok_str = f" | {usage['input_tokens']}in/{usage['output_tokens']}out tok" if usage else ''
+            print(f'\n🤖 Agent: [llm={llm_inference}s{tok_str}]\n{response}')
             messages.append({'role': 'assistant', 'content': response})
-            log.append({'turn': turn, 'type': 'thought', 'content': response, 'ts': t_thought, 'llm_s': llm_inference})
+            log.append({'turn': turn, 'type': 'thought', 'content': response, 'tokens': usage, 'ts': t_thought, 'llm_s': llm_inference})
 
             # ── Check if done ──
             done_m = re.search(r'<done>(.*?)</done>', response, re.DOTALL)
@@ -1019,10 +1050,16 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                     messages.append({'role': 'user', 'content': f'Command BLOCKED (dangerous: {dangerous}). Try a different approach that does not involve destructive operations.'})
                     log.append({'turn': turn, 'type': 'blocked', 'cmd': cmd, 'reason': dangerous, 'ts': time.time()})
                     continue
-                choice = input('  [Enter]=allow  [s]=skip  [q]=quit  > ').strip().lower()
+                choice = input('  [Enter]=allow  [s]=skip  [t]=steer  [q]=quit  > ').strip().lower()
                 if choice == 'q':
                     print('Aborted.')
                     break
+                if choice == 't':
+                    steer_line = input('  💬 Steer message: ').strip()
+                    if steer_line:
+                        messages.append({'role': 'user', 'content': steer_line})
+                        log.append({'turn': turn, 'type': 'steer', 'content': steer_line, 'ts': time.time()})
+                    continue  # re-run LLM with steer message
                 if choice == 's' or choice != '':
                     messages.append({'role': 'user', 'content': f'Command BLOCKED (dangerous: {dangerous}). Try a different approach that does not involve destructive operations.'})
                     log.append({'turn': turn, 'type': 'blocked', 'cmd': cmd, 'reason': dangerous, 'ts': time.time()})
@@ -1030,7 +1067,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
             elif confirm:
                 # ── Normal human gate ──
                 print(f'\n⚡ Proposed command: {cmd}')
-                choice = input('  [Enter]=run  [s]=skip  [q]=quit  [a]=auto-approve  > ').strip().lower()
+                choice = input('  [Enter]=run  [s]=skip  [t]=steer  [q]=quit  [a]=auto-approve  > ').strip().lower()
                 if choice == 'q':
                     print('Aborted.')
                     break
@@ -1038,6 +1075,12 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                     messages.append({'role': 'user', 'content': 'Command skipped by operator. Try a different approach.'})
                     log.append({'turn': turn, 'type': 'skip', 'cmd': cmd, 'ts': time.time()})
                     continue
+                if choice == 't':
+                    steer_line = input('  💬 Steer message: ').strip()
+                    if steer_line:
+                        messages.append({'role': 'user', 'content': steer_line})
+                        log.append({'turn': turn, 'type': 'steer', 'content': steer_line, 'ts': time.time()})
+                    continue  # re-run LLM with steer message before executing any command
                 if choice == 'a':
                     confirm = False
 
@@ -1267,7 +1310,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
     extract_skills_from_session(messages, mem, session_id, provider, outcome=outcome)
 
     # ── Save session (for resume) ──
-    session_file = save_session(task, provider.name, turn_count, messages, log, mem, session_id)
+    session_file = save_session(task, provider.name, turn_count, messages, log, mem, token_totals, session_id)
     print(f'\n📝 Session saved: {session_file}')
     print(f'   Resume with: python agent.py --resume {session_file}')
     # Auto-extract learnings — runs silently after every session
