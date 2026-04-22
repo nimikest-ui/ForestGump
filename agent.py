@@ -590,15 +590,37 @@ def is_output_success(output):
 
 
 def is_command_failure(output, cmd_base=''):
-    """Detect whether a command truly failed, with partial-success detection."""
+    """Detect whether a command truly failed.
+
+    Filters heredoc echo lines (bash '> ' prefix) before evaluation so that
+    expect scripts written as heredocs don't produce false progress signals.
+    """
     out = (output or '').lower()
     if not out:
         return True
 
+    # Filter heredoc echo lines — bash prints '> ' before each heredoc input line.
+    # These lines contain the script text (e.g. '> expect "password:"') but are
+    # NOT real output. Also filter out the heredoc opening lines (e.g., 'expect << EOF'
+    # or 'cat > file << EOF') which are command echoes, not real output.
+    lines = out.splitlines()
+    real_lines = []
+    for l in lines:
+        if not l.strip():
+            continue  # skip empty lines
+        if re.match(r'^>\s', l):
+            continue  # skip heredoc echo lines
+        if re.match(r'^(cat|echo|expect|sh|bash|python|perl|ruby|node)\s+.*<<', l):
+            continue  # skip heredoc opening declarations
+        real_lines.append(l)
+
+    if not real_lines:
+        return True   # all output was heredoc echo — nothing actually ran
+    eval_out = '\n'.join(real_lines)
+
     progress_markers = [
-        'spawn ',
+        'spawn ',          # expect spawned a process (real expect output, not echo)
         'password:',
-        'expect ',
         'connecting to',
         'connection established',
         'connected successfully',
@@ -608,15 +630,17 @@ def is_command_failure(output, cmd_base=''):
         'remote host identification has changed',
         'are you sure you want to continue connecting',
     ]
+    # 'expect ' intentionally removed: it matched heredoc echo lines like
+    # '> expect "password:"' and caused false progress detection.
 
-    if any(marker in out for marker in progress_markers):
+    if any(marker in eval_out for marker in progress_markers):
         # This command reached a live prompt or network interaction and should not be treated
         # as a hard failure unless it contains an explicit fatal error.
-        if 'command not found' in out or 'no such file' in out or 'unknown command' in out:
+        if 'command not found' in eval_out or 'no such file' in eval_out or 'unknown command' in eval_out:
             return True
-        if 'invalid' in out and 'timeout' not in out:
+        if 'invalid' in eval_out and 'timeout' not in eval_out:
             return True
-        if 'failed' in out and 'permission denied' not in out and 'authentication failed' not in out:
+        if 'failed' in eval_out and 'permission denied' not in eval_out and 'authentication failed' not in eval_out:
             return True
         return False
 
@@ -633,7 +657,7 @@ def is_command_failure(output, cmd_base=''):
         'operation not permitted',
         'invalid',
     ]
-    return any(marker in out for marker in fail_markers)
+    return any(marker in eval_out for marker in fail_markers)
 
 
 def build_round_review(turn, log, mem, task):
@@ -948,19 +972,31 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
             cmd = cmd_m.group(1).strip()
 
             # ── Repeat-command loop-breaker ──
-            # Strip wrappers (sudo / timeout N) to get the real tool name
+            # Count consecutive failures for this specific tool at the tail of the log.
+            # A success or a different command breaks the streak — prevents false positives
+            # when a tool succeeds between failures.
             cmd_base = command_base(cmd)
-            recent_failures = [
-                command_base(e['cmd'])
-                for e in log[-10:]
-                if e.get('type') == 'exec' and e.get('cmd', '').strip() and is_command_failure(e.get('output', ''), command_base(e['cmd']))
-            ]
-            loop_threshold = 5 if cmd_base == 'expect' else 4 if cmd_base in ('aireplay-ng', 'aircrack-ng') else 3
-            if cmd_base and recent_failures.count(cmd_base) >= loop_threshold:
-                print(f'\n⚠️  Loop detected: `{cmd_base}` failed {recent_failures.count(cmd_base)} times, injecting hard redirect')
+            consecutive_failures = 0
+            for entry in reversed(log):
+                if entry.get('type') != 'exec' or not entry.get('cmd', '').strip():
+                    continue
+                entry_base = command_base(entry['cmd'])
+                if entry_base != cmd_base:
+                    break  # different command: streak ends
+                if is_command_failure(entry.get('output', ''), entry_base):
+                    consecutive_failures += 1
+                else:
+                    break  # success: streak resets to 0
+
+            loop_threshold = 4 if cmd_base in ('aireplay-ng', 'aircrack-ng') else 3
+            if cmd_base and consecutive_failures >= loop_threshold:
+                print(f'\n⚠️  Loop detected: `{cmd_base}` failed {consecutive_failures}× in a row, injecting hard redirect')
                 messages.append({
                     'role': 'user',
-                    'content': f'STOP. Every `{cmd_base}` command has failed. That tool is not working. Do NOT use `{cmd_base}` again. Try a completely different tool or approach.',
+                    'content': (
+                        f'STOP. `{cmd_base}` has failed {consecutive_failures} times consecutively. '
+                        f'That tool is not working. Do NOT use `{cmd_base}` again. Try a completely different approach.'
+                    ),
                 })
                 log.append({'turn': turn, 'type': 'loop_break', 'cmd': cmd, 'ts': time.time()})
                 continue
