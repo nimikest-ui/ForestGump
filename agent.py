@@ -7,11 +7,11 @@ Usage:
   # Claude via Claude Code CLI (OAuth — uses your Pro subscription, no API key)
   python agent.py --provider claude "scan wifi networks"
 
-  # Ollama Cloud (set OLLAMA_API_KEY from ollama.com/settings/keys)
-  OLLAMA_API_KEY=your_key python agent.py --provider ollama --model "gpt-oss:120b-cloud" "scan wifi networks"
-
   # Ollama local
-  python agent.py --provider ollama --model "llama3:8b" --host http://localhost:11434 "scan wifi networks"
+    python agent.py --provider ollama --model "llama3:8b" "scan wifi networks"
+
+    # Ollama Cloud (set OLLAMA_API_KEY from ollama.com/settings/keys)
+    OLLAMA_API_KEY=your_key python agent.py --provider ollama --model "gpt-oss:120b-cloud" --host https://ollama.com "scan wifi networks"
 
   # Anthropic API (direct, needs ANTHROPIC_API_KEY)
   python agent.py --provider anthropic "scan wifi networks"
@@ -47,6 +47,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent.resolve()
 SESSIONS_DIR = SCRIPT_DIR / 'sessions'
 MEMORY_FILE = SCRIPT_DIR / 'memory.json'
+TECHNIQUES_FILE = SCRIPT_DIR / 'techniques.json'
 
 
 # ─── Utilities ────────────────────────────────────────────────
@@ -72,18 +73,30 @@ DANGEROUS_PATTERNS = [
     (r'\bifconfig\s+wlan0\s+down\b', 'taking down wlan0'),
     (r'\bip\s+link\s+set\s+wlan0\s+down\b', 'taking down wlan0'),
     (r'\bnmcli\s+.*wlan0.*disconnect\b', 'disconnecting wlan0'),
-    (r'\bairmon-ng\s+.*wlan0\b', 'monitor mode on wlan0'),
-    (r'\bairmon-ng\s+check\s+kill\b', 'airmon-ng check kill — kills NetworkManager, will drop internet'),
+    (r'\bairmon-ng\b', 'airmon-ng is forbidden — wlan1 is already in monitor mode, use airodump-ng with -w directly'),
     (r'wlan0.*mon\b', 'monitor mode on wlan0'),
     (r'\bchmod\s+777\s+/', 'chmod 777 on root paths'),
     (r'\bpasswd\b', 'changing passwords'),
     (r'\buserdel\b', 'deleting users'),
     (r'\breboot\b|\bshutdown\b|\bpoweroff\b|\binit\s+[06]\b', 'system reboot/shutdown'),
+    # SSH/telnet are interactive and hang waiting for password (only block direct SSH/telnet, not sshpass which is non-interactive)
+    (r'^\s*(ssh|telnet)[\s\-]', 'SSH/telnet are interactive and cause hangs — use sshpass with commands or scripted tools like paramiko'),
+    # Known problematic Bluetooth tools that hang/crash PTY without proper subprocess handling
+    (r'\bsdptool\b.*\bbrowse\b|\bsdptool\b.*\brecords\b|\bsdptool\b.*\bsearch\b', 'sdptool is unstable and hangs — use hcitool info or bluetoothctl info instead'),
+    (r'\brfcomm\b', 'rfcomm causes PTY hangs — use bluetoothctl connect instead'),
+    (r'\bgatttool\b', 'gatttool is problematic — use bluetoothctl gatt-tools or bluepy instead'),
+    (r'\bobexftp\b', 'obexftp causes PTY hangs — consider alternative tools'),
+    (r'\bbluesnarfer\b', 'bluesnarfer causes PTY hangs — try other enumeration methods'),
+    (r'\bl2ping\b', 'l2ping causes PTY hangs — use simple pings or connection tests'),
 ]
 
 
 def is_dangerous(cmd):
     """Return reason string if command matches a dangerous pattern, else None."""
+    # Hard safety rule: never allow any direct reference to wlan0.
+    if re.search(r'\bwlan0\b', cmd, re.IGNORECASE):
+        return 'wlan0 is protected and cannot be used'
+
     for pattern, reason in DANGEROUS_PATTERNS:
         if re.search(pattern, cmd, re.IGNORECASE):
             return reason
@@ -119,17 +132,17 @@ def sanitize_command(cmd):
         inner = re.sub(r'^(sudo\s+)?timeout\s+\d+\s+', r'\1', inner)
         return f'timeout 30 {inner}'
 
-    # Cap excessively long timeouts
+    # Cap excessively long timeouts (35s to allow airodump-ng 25s captures)
     m = re.match(r'^(sudo\s+)?timeout\s+(\d+)\s+(.+)', flat)
-    if m and int(m.group(2)) > 30:
+    if m and int(m.group(2)) > 35:
         prefix = m.group(1) or ''
-        return f'{prefix}timeout 30 {m.group(3)}'
+        return f'{prefix}timeout 35 {m.group(3)}'
 
     # Fix double timeout
     m = re.match(r'^(sudo\s+)?timeout\s+\d+\s+(sudo\s+)?timeout\s+(\d+)\s+(.+)', flat)
     if m:
         prefix = m.group(1) or m.group(2) or ''
-        seconds = min(int(m.group(3)), 30)
+        seconds = min(int(m.group(3)), 35)
         return f'{prefix}timeout {seconds} {m.group(4)}'
 
     return cmd
@@ -264,9 +277,10 @@ class OllamaProvider:
     def __init__(self, model='gpt-oss:120b-cloud', host=None):
         from ollama import Client
         api_key = os.environ.get('OLLAMA_API_KEY')
-        # Default to ollama.com cloud if API key is set and no host specified
+        # Default to local Ollama unless host is explicitly provided
+        # or cloud is implied by an API key.
         if not host:
-            host = 'https://ollama.com' if api_key else None
+            host = 'https://ollama.com' if api_key else 'http://localhost:11434'
         kwargs = {}
         if host:
             kwargs['host'] = host
@@ -332,7 +346,20 @@ def load_memory():
     """Load persistent memory (things learned across sessions)."""
     if MEMORY_FILE.exists():
         with open(MEMORY_FILE) as f:
-            return json.load(f)
+            data = json.load(f)
+        # Normalize networks: list of {ssid, bssid, ...} → dict keyed by ssid
+        if isinstance(data.get('networks'), list):
+            data['networks'] = {
+                n['ssid']: {k: v for k, v in n.items() if k != 'ssid'}
+                for n in data['networks'] if n.get('ssid')
+            }
+        # Normalize credentials: list → dict keyed by ssid/target
+        if isinstance(data.get('credentials'), list):
+            data['credentials'] = {
+                c.get('ssid', c.get('target', f'cred_{i}')): {k: v for k, v in c.items() if k not in ('ssid', 'target')}
+                for i, c in enumerate(data['credentials'])
+            }
+        return data
     return {'facts': [], 'networks': {}, 'credentials': {}, 'notes': []}
 
 
@@ -360,6 +387,35 @@ def memory_context(mem):
     if mem.get('notes'):
         parts.append('Notes:\n' + '\n'.join(f'- {n}' for n in mem['notes'][-10:]))
     return '\n\n'.join(parts) if parts else ''
+
+
+# ─── Technique Memory ─────────────────────────────────────────
+
+def load_techniques():
+    """Load discovered techniques from persistent storage."""
+    if TECHNIQUES_FILE.exists():
+        with open(TECHNIQUES_FILE) as f:
+            data = json.load(f)
+        return data.get('techniques', {})
+    return {}
+
+
+def techniques_context(techniques):
+    """Format techniques into a string for the system prompt."""
+    if not techniques:
+        return ''
+    parts = ['PROVEN TECHNIQUES (from previous sessions):']
+    for key, tech in list(techniques.items())[:5]:  # Show top 5 techniques
+        parts.append(f'\n✓ {tech.get("name", key)}:')
+        if 'problem' in tech:
+            parts.append(f'  Problem: {tech["problem"]}')
+        if 'solution' in tech:
+            parts.append(f'  Solution: {tech["solution"]}')
+        if 'template' in tech:
+            parts.append(f'  Template: {tech["template"]}')
+        if tech.get('tags'):
+            parts.append(f'  Tags: {", ".join(tech["tags"])}')
+    return '\n'.join(parts)
 
 
 def extract_memory_updates(response, output, cmd, mem):
@@ -432,6 +488,25 @@ def list_sessions():
     return sessions
 
 
+# ─── Bluetooth Support ────────────────────────────────────────
+
+def get_bluetooth_adapters():
+    """Detect Bluetooth adapters on the system."""
+    import pathlib as _p
+    adapters = []
+    bt_dir = _p.Path('/sys/class/bluetooth')
+    if bt_dir.exists():
+        for device_path in bt_dir.iterdir():
+            if device_path.is_dir():
+                adapters.append(device_path.name)
+    return adapters
+
+
+def has_bluetooth_hardware():
+    """Check if Bluetooth hardware is available."""
+    return len(get_bluetooth_adapters()) > 0
+
+
 # ─── The Agent ────────────────────────────────────────────────
 
 SYSTEM = """Welcome to the world. This is your environment — a Kali Linux machine with a live bash shell.
@@ -442,10 +517,17 @@ IMPORTANT RULES:
 - Output EXACTLY ONE <cmd>...</cmd> per response, then STOP and wait. I will run it and send you the real output.
 - Do NOT guess or imagine command output. You must wait for the actual terminal response.
 - Do NOT put multiple <cmd> blocks in one message.
+- ALWAYS prefix commands with sudo. Most tools require root.
 - For long-running commands (captures, attacks), do NOT background them with &. Just run them directly. The shell supports up to 5 minutes per command.
-- If a command needs to run for a limited time, use timeout: <cmd>timeout 30 airodump-ng wlan1</cmd>
+- If a command needs to run for a limited time, use timeout: <cmd>sudo timeout 25 airodump-ng --output-format csv -w /tmp/scan wlan1</cmd>
 - NEVER use patterns like "cmd & sleep N && kill %1" — they will break. Use "timeout N cmd" instead.
-- CRITICAL: airodump-ng is a ncurses app — its screen output CANNOT be captured via pipes or redirection. Instead, use it with --output-format csv -w /tmp/file, then run a SEPARATE command to read the file. Or better yet, use "sudo iw dev wlan1 scan" which outputs to stdout normally.
+- CRITICAL: wlan1 is ALREADY in monitor mode. Do NOT run airmon-ng start/stop/check — it is not needed and will hang. Using airmon-ng in any form is FORBIDDEN.
+- CRITICAL: wlan1 is the WiFi adapter. Its name is always "wlan1" — never "wlan1mon".
+- CRITICAL: airodump-ng screen output CANNOT be captured. ALWAYS write to file: <cmd>sudo timeout 25 airodump-ng --output-format csv -w /tmp/scan wlan1</cmd> then read with <cmd>cat /tmp/scan-01.csv</cmd>
+- CRITICAL: "iw dev wlan1 scan" does NOT work in monitor mode. Never use it. Use airodump-ng -w only.
+- BLUETOOTH: Use SAFE tools only: **hcitool** (scan, info, cc, con), **bluetoothctl** (scan on, info, power on, connect), **hciconfig** (adapters). Scan for devices: sudo hcitool scan. Get info: hcitool info [MAC]. Connect: bluetoothctl connect [MAC].
+- DO NOT use: sdptool (hangs), rfcomm (hangs), gatttool (broken), obexftp (hangs), bluesnarfer (hangs), l2ping (hangs). If enumeration needed, use bluetoothctl info [MAC] to check services. Start adapter with: sudo hciconfig hci0 up
+- If a command fails, do NOT retry the same command. Try a completely different approach.
 - When you are truly finished, use <done>what you accomplished</done> instead of a command.
 - NEVER touch wlan0 — that is the main internet connection. For all WiFi operations use wlan1 ONLY.
 
@@ -459,6 +541,11 @@ Then I will reply with the real output, and you decide the next step."""
 def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
     shell = Shell()
     mem = load_memory()
+    techniques = load_techniques()
+
+    # Build system prompt with techniques (from previous sessions)
+    techniques_str = techniques_context(techniques)
+    full_system = SYSTEM + ('\n\n' + techniques_str if techniques_str else '')
 
     # Resume or fresh start
     if resume_data:
@@ -509,15 +596,18 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
             print(f'\n{"─"*25} Turn {turn} {"─"*25}')
 
             # ── LLM thinks ──
+            t_llm_start = time.time()
             try:
-                response = provider.chat(messages, SYSTEM)
+                response = provider.chat(messages, full_system)
             except Exception as e:
                 print(f'\n❌ Provider error: {e}')
                 break
+            t_thought = time.time()
+            llm_inference = round(t_thought - t_llm_start, 1)
 
-            print(f'\n🤖 Agent:\n{response}')
+            print(f'\n🤖 Agent: [llm={llm_inference}s]\n{response}')
             messages.append({'role': 'assistant', 'content': response})
-            log.append({'turn': turn, 'type': 'thought', 'content': response})
+            log.append({'turn': turn, 'type': 'thought', 'content': response, 'ts': t_thought, 'llm_s': llm_inference})
 
             # ── Check if done ──
             done_m = re.search(r'<done>(.*?)</done>', response, re.DOTALL)
@@ -539,6 +629,47 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
 
             cmd = cmd_m.group(1).strip()
 
+            # ── Repeat-command loop-breaker ──
+            # Strip wrappers (sudo / timeout N) to get the real tool name
+            def _tool_base(c):
+                parts = c.strip().split()
+                i = 0
+                if i < len(parts) and parts[i] in ('sudo', 'su'):
+                    i += 1
+                if i < len(parts) and parts[i] == 'timeout' and i + 1 < len(parts) and parts[i+1].isdigit():
+                    i += 2
+                if i < len(parts) and parts[i] in ('sudo',):
+                    i += 1
+                return parts[i] if i < len(parts) else ''
+            cmd_base = _tool_base(cmd)
+            recent_bases = [
+                _tool_base(e['cmd'])
+                for e in log[-10:] if e.get('type') == 'exec' and e.get('cmd', '').strip()
+            ]
+            # aireplay-ng legitimately needs multiple runs (capture + deauth); allow up to 3
+            loop_threshold = 3 if cmd_base in ('aireplay-ng', 'aircrack-ng') else 2
+            if cmd_base and recent_bases.count(cmd_base) >= loop_threshold:
+                print(f'\n⚠️  Loop detected: `{cmd_base}` failed {recent_bases.count(cmd_base)} times, injecting hard redirect')
+                messages.append({
+                    'role': 'user',
+                    'content': f'STOP. Every `{cmd_base}` command has failed. That tool is not working. Do NOT use `{cmd_base}` again. Try a completely different tool or approach.',
+                })
+                log.append({'turn': turn, 'type': 'loop_break', 'cmd': cmd, 'ts': time.time()})
+                continue
+
+            # ── Auto-inject sudo if missing ──
+            # Commands that genuinely don't need sudo
+            NO_SUDO = {'echo', 'cat', 'ls', 'grep', 'awk', 'sed', 'cut', 'sort',
+                       'head', 'tail', 'wc', 'tee', 'tr', 'find', 'file', 'stat',
+                       'pwd', 'cd', 'which', 'type', 'date', 'id', 'whoami',
+                       'python', 'python3', 'bash', 'sh', 'read', 'true', 'false',
+                       'ssh', 'sshpass', 'telnet', 'nc', 'netcat'}
+            first_word = cmd.strip().split()[0] if cmd.strip() else ''
+            bare = first_word.lstrip('/')
+            if first_word and bare not in ('sudo', 'timeout', 'su') and bare not in NO_SUDO:
+                cmd = 'sudo ' + cmd
+                print(f'\n🔑 Auto-sudo: {cmd}')
+
             # ── Sanitize command (rewrite background patterns) ──
             original_cmd = cmd
             cmd = sanitize_command(cmd)
@@ -551,13 +682,19 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
             if dangerous:
                 print(f'\n🛑 DANGEROUS: {dangerous}')
                 print(f'   Command: {cmd}')
+                if not confirm:
+                    # In YOLO mode, dangerous commands are auto-blocked (never auto-allowed)
+                    print('  [auto-blocked in --no-confirm mode]')
+                    messages.append({'role': 'user', 'content': f'Command BLOCKED (dangerous: {dangerous}). Try a different approach that does not involve destructive operations.'})
+                    log.append({'turn': turn, 'type': 'blocked', 'cmd': cmd, 'reason': dangerous, 'ts': time.time()})
+                    continue
                 choice = input('  [Enter]=allow  [s]=skip  [q]=quit  > ').strip().lower()
                 if choice == 'q':
                     print('Aborted.')
                     break
                 if choice == 's' or choice != '':
                     messages.append({'role': 'user', 'content': f'Command BLOCKED (dangerous: {dangerous}). Try a different approach that does not involve destructive operations.'})
-                    log.append({'turn': turn, 'type': 'blocked', 'cmd': cmd, 'reason': dangerous})
+                    log.append({'turn': turn, 'type': 'blocked', 'cmd': cmd, 'reason': dangerous, 'ts': time.time()})
                     continue
             elif confirm:
                 # ── Normal human gate ──
@@ -568,35 +705,220 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                     break
                 if choice == 's':
                     messages.append({'role': 'user', 'content': 'Command skipped by operator. Try a different approach.'})
-                    log.append({'turn': turn, 'type': 'skip', 'cmd': cmd})
+                    log.append({'turn': turn, 'type': 'skip', 'cmd': cmd, 'ts': time.time()})
                     continue
                 if choice == 'a':
                     confirm = False
 
+            # ── wlan1 liveness check before wireless tools ──
+            if re.search(r'\b(airodump-ng|aireplay-ng|aircrack-ng)\b', cmd):
+                import pathlib as _pl
+                wlan1_ok = _pl.Path('/sys/class/net/wlan1').exists()
+                if not wlan1_ok:
+                    print('\n⚠️  wlan1 interface not found — check USB adapter')
+                    output = '[wlan1 interface missing. The USB WiFi adapter may have crashed or been unplugged. Run: sudo iw dev; and re-insert the adapter if needed.]'
+                    t_exec_start = t_exec_end = time.time()
+                    elapsed = 0.0
+                    display = output
+                    context = output
+                    print(f'\n📟 Output: [exec=0s]\n{display}')
+                    messages.append({'role': 'user', 'content': f'Terminal output:\n```\n{context}\n```'})
+                    log.append({'turn': turn, 'type': 'exec', 'cmd': cmd, 'output': output, 'ts': time.time(), 'exec_s': 0.0})
+                    continue
+
+            # ── airodump-ng special handling ──
+            # airodump-ng is a curses app — it never writes to stdout.
+            # Ensure: (1) /tmp output path, (2) timeout wrapper, (3) file read directly via Python after.
+            airodump_csv_path = None
+            airodump_cap_only = False
+            is_airodump = bool(re.search(r'\bairodump-ng\b', cmd))
+            if is_airodump:
+                # Extract -w path if present; default to /tmp/agent_scan
+                w_m = re.search(r'-w\s+(\S+)', cmd)
+                if w_m:
+                    raw_path = re.sub(r'-0\d\.csv$', '', w_m.group(1))
+                    # Force /tmp prefix so the file ends up in a known location
+                    stem = os.path.basename(raw_path)
+                    airodump_csv_path = f'/tmp/{stem}'
+                    # Rewrite -w in the command to use absolute /tmp path
+                    cmd = re.sub(r'-w\s+\S+', f'-w {airodump_csv_path}', cmd)
+                else:
+                    airodump_csv_path = '/tmp/agent_scan'
+                    cmd = cmd.rstrip() + f' -w {airodump_csv_path}'
+                # Ensure timeout wrapper — use 20s capture if not set
+                if not re.search(r'\btimeout\s+\d+', cmd):
+                    inner = re.sub(r'^sudo\s+', '', cmd)
+                    cmd = f'sudo timeout 20 {inner}'
+                    print(f'\n⏱️  airodump-ng: auto-wrapped → {cmd}')
+                # Remove invalid channel flags (airodump-ng doesn't accept -c 0 or --channel 0)
+                cmd = re.sub(r'\s+(?:-c|--channel)\s+0\b', '', cmd)
+                # Detect cap-only mode (no CSV will be written)
+                if re.search(r'--output-format\s+cap\b', cmd) and not re.search(r'--output-format.*csv', cmd):
+                    airodump_cap_only = True
+                # Ensure wlan1 is last arg (model sometimes omits it)
+                if not re.search(r'\bwlan\d\b', cmd):
+                    cmd = cmd.rstrip() + ' wlan1'
+                    print(f'\n🔧 Auto-appended wlan1: {cmd}')
+
+            # ── aireplay-ng special handling ──
+            is_aireplay = bool(re.search(r'\baireplay-ng\b', cmd))
+
+            # ── nmap special handling (scanner tool that hangs PTY) ──
+            is_nmap = bool(re.search(r'\bnmap\b', cmd))
+            if is_nmap:
+                if not re.search(r'\btimeout\s+\d+', cmd):
+                    inner = re.sub(r'^sudo\s+', '', cmd)
+                    cmd = f'sudo timeout 30 {inner}'
+                    print(f'\n⏱️  nmap: auto-wrapped with timeout → {cmd}')
+
+            # ── Bluetooth-related command detection ──
+            # Detect safe Bluetooth tools that work in subprocess
+            is_bluetooth = bool(re.search(r'\b(hcitool|bluetoothctl|hciconfig|hcidump|bluelog|bluerange|crackle)\b', cmd))
+            if is_bluetooth:
+                adapters = get_bluetooth_adapters()
+                if not adapters:
+                    print(f'\n⚠️  No Bluetooth adapters found in /sys/class/bluetooth/')
+                else:
+                    print(f'\n📡 Bluetooth adapter online: {adapters[0]}')
+
             # ── Execute ──
             print(f'\n⚡ Executing: {cmd}')
 
-            # Detect if command uses timeout already, respect it; otherwise cap at 15s
-            timeout_m = re.search(r'timeout\s+(\d+)', cmd)
-            cmd_timeout = min(int(timeout_m.group(1)) + 5, 30) if timeout_m else 15
+            if is_aireplay:
+                # aireplay-ng also hangs PTY (raw sockets + curses) — run via subprocess
+                timeout_m = re.search(r'timeout\s+(\d+)', cmd)
+                cap_s = int(timeout_m.group(1)) if timeout_m else 15
+                t_exec_start = time.time()
+                try:
+                    result = subprocess.run(
+                        cmd, shell=True,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        timeout=cap_s + 8,
+                        env={**os.environ, 'TERM': 'xterm'},
+                    )
+                    output = result.stdout.decode('utf-8', errors='replace').strip() or '[aireplay-ng ran with no output]'
+                except subprocess.TimeoutExpired:
+                    output = f'[aireplay-ng timed out after {cap_s}s]'
+                t_exec_end = time.time()
+                elapsed = round(t_exec_end - t_exec_start, 1)
+            elif is_nmap:
+                # nmap hangs PTY when running network scans — run via subprocess
+                timeout_m = re.search(r'timeout\s+(\d+)', cmd)
+                scan_timeout = int(timeout_m.group(1)) if timeout_m else 30
+                t_exec_start = time.time()
+                try:
+                    result = subprocess.run(
+                        cmd, shell=True,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        timeout=scan_timeout + 8,
+                        env={**os.environ, 'TERM': 'xterm'},
+                    )
+                    output = result.stdout.decode('utf-8', errors='replace').strip()
+                    if not output:
+                        output = '[nmap ran with no output — target may not be reachable]'
+                except subprocess.TimeoutExpired:
+                    output = f'[nmap timed out after {scan_timeout}s — scan may still be running]'
+                except Exception as e:
+                    output = f'[nmap error: {str(e)}]'
+                t_exec_end = time.time()
+                elapsed = round(t_exec_end - t_exec_start, 1)
+            elif is_bluetooth:
+                # Bluetooth tools (hcitool, bluetoothctl, hciconfig, hcidump, bluelog, crackle)
+                # Run via subprocess to avoid PTY hangs that occur with interactive Bluetooth tools
+                timeout_m = re.search(r'timeout\s+(\d+)', cmd)
+                bt_timeout = int(timeout_m.group(1)) if timeout_m else 20
+                t_exec_start = time.time()
+                try:
+                    result = subprocess.run(
+                        cmd, shell=True,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        timeout=bt_timeout + 5,
+                        env={**os.environ, 'TERM': 'xterm'},
+                    )
+                    output = result.stdout.decode('utf-8', errors='replace').strip()
+                    if not output:
+                        output = '[Bluetooth command completed with no output]'
+                except subprocess.TimeoutExpired:
+                    output = f'[Bluetooth command timed out after {bt_timeout}s — device may be slow or unreachable]'
+                except Exception as e:
+                    output = f'[Bluetooth command error: {str(e)}]'
+                t_exec_end = time.time()
+                elapsed = round(t_exec_end - t_exec_start, 1)
+            elif is_airodump:
+                # Run airodump-ng via subprocess, NOT the PTY.
+                # PTY uses TERM=dumb which causes airodump-ng to exit immediately.
+                timeout_m = re.search(r'timeout\s+(\d+)', cmd)
+                cap_s = int(timeout_m.group(1)) if timeout_m else 20
+                t_exec_start = time.time()
+                try:
+                    subprocess.run(
+                        cmd, shell=True,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=cap_s + 8,
+                        env={**os.environ, 'TERM': 'xterm'},
+                    )
+                except subprocess.TimeoutExpired:
+                    pass
+                t_exec_end = time.time()
+                elapsed = round(t_exec_end - t_exec_start, 1)
+                output = ''  # populated below
+            else:
+                # Detect if command uses timeout already, respect it; otherwise cap at 15s
+                timeout_m = re.search(r'timeout\s+(\d+)', cmd)
+                cmd_timeout = min(int(timeout_m.group(1)) + 5, 30) if timeout_m else 15
+                t_exec_start = time.time()
+                output = shell.run(cmd, timeout=cmd_timeout)
+                t_exec_end = time.time()
+                elapsed = round(t_exec_end - t_exec_start, 1)
 
-            output = shell.run(cmd, timeout=cmd_timeout)
+            # ── Post-run: auto-read airodump output (direct Python read) ──
+            if is_airodump:
+                import pathlib
+                if airodump_csv_path:
+                    if airodump_cap_only:
+                        # Cap-only mode: just report file size
+                        cap_file = f'{airodump_csv_path}-01.cap'
+                        p = pathlib.Path(cap_file)
+                        if p.exists() and p.stat().st_size > 100:
+                            output = f'[airodump-ng cap capture complete: {cap_file} ({p.stat().st_size} bytes). Use aircrack-ng to analyse.]'
+                            print(f'\n📦 Cap written: {cap_file} ({p.stat().st_size}B)')
+                        else:
+                            output = f'[airodump-ng ran for {elapsed}s but no cap at {cap_file}. No handshake captured yet — try deauth with aireplay-ng first.]'
+                    else:
+                        csv_file = f'{airodump_csv_path}-01.csv'
+                        p = pathlib.Path(csv_file)
+                        if p.exists() and p.stat().st_size > 50:
+                            print(f'\n📄 Auto-read CSV: {csv_file}')
+                            output = p.read_text(errors='replace').strip()
+                        else:
+                            output = f'[airodump-ng ran for {elapsed}s but no CSV at {csv_file}. Networks may be out of range, or wlan1 is not in monitor mode.]'
+                else:
+                    output = f'[airodump-ng ran for {elapsed}s — no -w path specified, cannot read output]'
 
             # Detect empty/broken output — shell might be corrupted by ncurses
-            clean = output.replace('echo', '').replace('[command timed out]', '').strip()
-            if not clean or clean == 'echo':
-                print('\n⚠️  Empty output — resetting shell')
-                shell.close()
-                shell = Shell()
-                output = f'[command returned no output after {cmd_timeout}s — the shell has been reset. This can happen with ncurses tools like airodump-ng. Try a different approach, e.g. use "sudo iw dev wlan1 scan" instead of airodump-ng, or redirect output to a file.]'
+            elif not is_airodump and not is_aireplay and not is_bluetooth and not is_nmap:
+                clean = output.replace('echo', '').replace('[command timed out]', '').strip()
+                if not clean or clean == 'echo':
+                    print('\n⚠️  Empty output — resetting shell')
+                    shell.close()
+                    shell = Shell()
+                    output = f'[command returned no output after {cmd_timeout}s — the shell has been reset.]'
 
             # Truncate massive output for display and context
             display = output[:5000] + ('\n... [truncated]' if len(output) > 5000 else '')
             context = output[:12000] + ('\n... [truncated]' if len(output) > 12000 else '')
 
-            print(f'\n📟 Output:\n{display}')
+            print(f'\n📟 Output: [exec={elapsed}s]\n{display}')
             messages.append({'role': 'user', 'content': f'Terminal output:\n```\n{context}\n```'})
-            log.append({'turn': turn, 'type': 'exec', 'cmd': cmd, 'output': output[:12000]})
+            log.append({'turn': turn, 'type': 'exec', 'cmd': cmd, 'output': output[:12000], 'ts': t_exec_start, 'exec_s': elapsed})
 
             # ── Auto-extract memory from output ──
             mem = extract_memory_updates(response, output, cmd, mem)
@@ -626,7 +948,7 @@ def main():
     ap.add_argument('--provider', choices=['claude', 'ollama', 'anthropic'], default='claude',
                     help='Model provider (default: claude)')
     ap.add_argument('--model', help='Model name override')
-    ap.add_argument('--host', help='Ollama host URL (omit to auto-detect)')
+    ap.add_argument('--host', help='Ollama host URL (default: http://localhost:11434)')
     ap.add_argument('--no-confirm', action='store_true',
                     help='Skip command confirmation (YOLO mode)')
     ap.add_argument('--max-turns', type=int, default=50)
@@ -656,11 +978,11 @@ def main():
             sys.exit(1)
         provider = AnthropicProvider(args.model or 'claude-sonnet-4-20250514')
     else:
-        if not os.environ.get('OLLAMA_API_KEY') and not args.host:
-            print('❌ Set OLLAMA_API_KEY for cloud, or use --host for local ollama.')
-            sys.exit(1)
+        # Prefer local Ollama by default. Cloud is used if host is explicitly
+        # set to ollama.com (or if host omitted but OLLAMA_API_KEY is present).
+        default_ollama_model = 'gpt-oss:120b-cloud' if os.environ.get('OLLAMA_API_KEY') else 'llama3.2:latest'
         provider = OllamaProvider(
-            model=args.model or 'gpt-oss:120b-cloud',
+            model=args.model or default_ollama_model,
             host=args.host,
         )
 

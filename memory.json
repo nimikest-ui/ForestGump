@@ -1,19 +1,31 @@
 {
-  "facts": [],
   "networks": {
     "shalom1": {
-      "bssid": "00:f8:cc:c0:ce:f0"
+      "bssid": "00:f8:cc:c0:ce:f0",
+      "channel": null,
+      "encryption": null,
+      "notes": ""
     },
     "4": {
-      "bssid": "00:f8:cc:c0:ce:f3"
+      "bssid": "00:f8:cc:c0:ce:f3",
+      "channel": null,
+      "encryption": null,
+      "notes": ""
     },
     "Ren1993": {
-      "bssid": "00:f8:cc:c0:55:80"
+      "bssid": "00:f8:cc:c0:55:80",
+      "channel": null,
+      "encryption": null,
+      "notes": ""
     },
     "kevin": {
-      "bssid": "da:d8:e5:b0:0b:6f"
+      "bssid": "da:d8:e5:b0:0b:6f",
+      "channel": null,
+      "encryption": null,
+      "notes": ""
     }
   },
-  "credentials": {},
-  "notes": []
+  "credentials": {
+    "auto_password": "[command timed out]"
+  }
 }
