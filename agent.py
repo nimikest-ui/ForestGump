@@ -44,6 +44,8 @@ import glob
 from datetime import datetime
 from pathlib import Path
 
+from skills import init_db as init_skills_db, skills_context, extract_skills_from_session, migrate_techniques_json
+
 SCRIPT_DIR = Path(__file__).parent.resolve()
 SESSIONS_DIR = SCRIPT_DIR / 'sessions'
 MEMORY_FILE = SCRIPT_DIR / 'memory.json'
@@ -80,7 +82,7 @@ DANGEROUS_PATTERNS = [
     (r'\buserdel\b', 'deleting users'),
     (r'\breboot\b|\bshutdown\b|\bpoweroff\b|\binit\s+[06]\b', 'system reboot/shutdown'),
     # SSH/telnet are interactive and hang waiting for password (only block direct SSH/telnet, not sshpass which is non-interactive)
-    (r'^\s*(ssh|telnet)[\s\-]', 'SSH/telnet are interactive and cause hangs — use sshpass with commands or scripted tools like paramiko'),
+    # (r'^\s*(ssh|telnet)[\s\-]', 'SSH/telnet are interactive and cause hangs — use sshpass with commands or scripted tools like paramiko'),
     # Known problematic Bluetooth tools that hang/crash PTY without proper subprocess handling
     (r'\bsdptool\b.*\bbrowse\b|\bsdptool\b.*\brecords\b|\bsdptool\b.*\bsearch\b', 'sdptool is unstable and hangs — use hcitool info or bluetoothctl info instead'),
     (r'\brfcomm\b', 'rfcomm causes PTY hangs — use bluetoothctl connect instead'),
@@ -400,13 +402,40 @@ def load_techniques():
     return {}
 
 
-def techniques_context(techniques):
-    """Format techniques into a string for the system prompt."""
+def techniques_context(techniques, task=''):
+    """Format techniques into a string for the system prompt.
+
+    Ranks by relevance to current task + efficiency score.
+    Score = (use_count * 100) - best_session_turns
+    Fewer turns to solve = higher priority.
+    """
     if not techniques:
         return ''
-    parts = ['PROVEN TECHNIQUES (from previous sessions):']
-    for key, tech in list(techniques.items())[:5]:  # Show top 5 techniques
-        parts.append(f'\n✓ {tech.get("name", key)}:')
+
+    task_lower = task.lower()
+    task_tags = set()
+    if any(w in task_lower for w in ['ssh', 'bandit', 'overthewire', 'port 2220']):
+        task_tags.update(['ssh', 'bandit', 'automation'])
+    if any(w in task_lower for w in ['wifi', 'wlan', 'wpa', 'handshake']):
+        task_tags.update(['wifi', 'wireless'])
+    if any(w in task_lower for w in ['decode', 'hex', 'base64', 'gzip', 'rot13']):
+        task_tags.update(['decode', 'forensics'])
+
+    def relevance(item):
+        tech_tags = set(item[1].get('tags', []))
+        overlap = len(tech_tags & task_tags) * 100
+        # Fewer turns = higher efficiency bonus (max 50 pts at 0 turns)
+        efficiency = max(0, 50 - item[1].get('best_session_turns', 50))
+        usage = item[1].get('use_count', 1) * 10
+        return overlap + efficiency + usage
+
+    ranked = sorted(techniques.items(), key=relevance, reverse=True)
+
+    parts = ['PROVEN TECHNIQUES (most relevant + efficient first):']
+    for key, tech in ranked[:5]:
+        turns = tech.get('best_session_turns', '?')
+        uses = tech.get('use_count', 1)
+        parts.append(f'\n✓ {tech.get("name", key)} [used {uses}x, best={turns} turns]:')
         if 'problem' in tech:
             parts.append(f'  Problem: {tech["problem"]}')
         if 'solution' in tech:
@@ -517,7 +546,7 @@ IMPORTANT RULES:
 - Output EXACTLY ONE <cmd>...</cmd> per response, then STOP and wait. I will run it and send you the real output.
 - Do NOT guess or imagine command output. You must wait for the actual terminal response.
 - Do NOT put multiple <cmd> blocks in one message.
-- ALWAYS prefix commands with sudo. Most tools require root.
+- Prefix commands with sudo when they need root access.
 - For long-running commands (captures, attacks), do NOT background them with &. Just run them directly. The shell supports up to 5 minutes per command.
 - If a command needs to run for a limited time, use timeout: <cmd>sudo timeout 25 airodump-ng --output-format csv -w /tmp/scan wlan1</cmd>
 - NEVER use patterns like "cmd & sleep N && kill %1" — they will break. Use "timeout N cmd" instead.
@@ -543,9 +572,18 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
     mem = load_memory()
     techniques = load_techniques()
 
-    # Build system prompt with techniques (from previous sessions)
-    techniques_str = techniques_context(techniques)
-    full_system = SYSTEM + ('\n\n' + techniques_str if techniques_str else '')
+    # Initialize skills DB and migrate techniques.json on first run
+    init_skills_db()
+    migrate_techniques_json(SCRIPT_DIR / 'techniques.json')
+
+    # Build system prompt with skills from experience (search by task keywords)
+    skill_str = skills_context(task, limit=5)
+    full_system = SYSTEM + ('\n\n' + skill_str if skill_str else '')
+
+    # Fall back to static techniques if no skills yet
+    if not skill_str:
+        techniques_str = techniques_context(techniques, task or '')
+        full_system = SYSTEM + ('\n\n' + techniques_str if techniques_str else '')
 
     # Resume or fresh start
     if resume_data:
@@ -656,19 +694,6 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                 })
                 log.append({'turn': turn, 'type': 'loop_break', 'cmd': cmd, 'ts': time.time()})
                 continue
-
-            # ── Auto-inject sudo if missing ──
-            # Commands that genuinely don't need sudo
-            NO_SUDO = {'echo', 'cat', 'ls', 'grep', 'awk', 'sed', 'cut', 'sort',
-                       'head', 'tail', 'wc', 'tee', 'tr', 'find', 'file', 'stat',
-                       'pwd', 'cd', 'which', 'type', 'date', 'id', 'whoami',
-                       'python', 'python3', 'bash', 'sh', 'read', 'true', 'false',
-                       'ssh', 'sshpass', 'telnet', 'nc', 'netcat'}
-            first_word = cmd.strip().split()[0] if cmd.strip() else ''
-            bare = first_word.lstrip('/')
-            if first_word and bare not in ('sudo', 'timeout', 'su') and bare not in NO_SUDO:
-                cmd = 'sudo ' + cmd
-                print(f'\n🔑 Auto-sudo: {cmd}')
 
             # ── Sanitize command (rewrite background patterns) ──
             original_cmd = cmd
@@ -931,10 +956,20 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
     # ── Save memory ──
     save_memory(mem)
 
+    # ── Extract skills from successful session ──
+    outcome = 'success' if turn_count > 0 else 'abandoned'
+    extract_skills_from_session(messages, mem, session_id, provider, outcome=outcome)
+
     # ── Save session (for resume) ──
     session_file = save_session(task, provider.name, turn_count, messages, log, mem, session_id)
     print(f'\n📝 Session saved: {session_file}')
     print(f'   Resume with: python agent.py --resume {session_file}')
+    # Auto-extract learnings — runs silently after every session
+    try:
+        from extract_learnings import learn_from_session
+        learn_from_session(session_file)
+    except Exception:
+        pass  # Never break agent execution due to learning errors
 
 
 # ─── Entry ────────────────────────────────────────────────────
