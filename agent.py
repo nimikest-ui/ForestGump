@@ -41,6 +41,7 @@ import argparse
 import uuid
 import signal
 import glob
+import random
 from datetime import datetime
 from pathlib import Path
 
@@ -543,6 +544,206 @@ def extract_memory_updates(response, output, cmd, mem):
     return mem
 
 
+def command_base(cmd):
+    """Extract command base name without wrappers like sudo/timeout."""
+    parts = cmd.strip().split()
+    i = 0
+    if i < len(parts) and parts[i] in ('sudo', 'su'):
+        i += 1
+    if i + 1 < len(parts) and parts[i] == 'timeout' and parts[i + 1].isdigit():
+        i += 2
+    if i < len(parts) and parts[i] == 'sudo':
+        i += 1
+    return parts[i] if i < len(parts) else ''
+
+
+def is_output_success(output):
+    """Heuristic success detector for terminal command output."""
+    if not output:
+        return False
+    out = output.lower()
+    fail_markers = [
+        'command not found',
+        'no such file',
+        'permission denied',
+        'failed',
+        'error',
+        'timed out',
+        'not found',
+        'traceback',
+        'operation not permitted',
+        'invalid',
+    ]
+    success_markers = [
+        'completed',
+        'success',
+        'connected',
+        'written',
+        'captured',
+        'found',
+        'listening',
+    ]
+
+    if any(m in out for m in fail_markers):
+        return False
+    return any(m in out for m in success_markers) or len(out.strip()) > 20
+
+
+def is_command_failure(output, cmd_base=''):
+    """Detect whether a command truly failed, with partial-success detection."""
+    out = (output or '').lower()
+    if not out:
+        return True
+
+    progress_markers = [
+        'spawn ',
+        'password:',
+        'expect ',
+        'connecting to',
+        'connection established',
+        'connected successfully',
+        'authentication failed',
+        'userauth',
+        'permission denied, please try again',
+        'remote host identification has changed',
+        'are you sure you want to continue connecting',
+    ]
+
+    if any(marker in out for marker in progress_markers):
+        # This command reached a live prompt or network interaction and should not be treated
+        # as a hard failure unless it contains an explicit fatal error.
+        if 'command not found' in out or 'no such file' in out or 'unknown command' in out:
+            return True
+        if 'invalid' in out and 'timeout' not in out:
+            return True
+        if 'failed' in out and 'permission denied' not in out and 'authentication failed' not in out:
+            return True
+        return False
+
+    fail_markers = [
+        'command not found',
+        'no such file',
+        'permission denied',
+        'authentication failed',
+        'timed out',
+        'error',
+        'failed',
+        'not found',
+        'traceback',
+        'operation not permitted',
+        'invalid',
+    ]
+    return any(marker in out for marker in fail_markers)
+
+
+def build_round_review(turn, log, mem, task):
+    """Build a ranked success/failure review and retrieval hints for next moves."""
+    exec_events = [e for e in log if e.get('type') == 'exec']
+    blocked_events = [e for e in log if e.get('type') in ('blocked', 'loop_break')]
+
+    recent = exec_events[-12:]
+    if not recent and not blocked_events:
+        return ''
+
+    success_rank = {}
+    failure_rank = {}
+    total_success = 0
+    total_fail = 0
+
+    for event in recent:
+        cmd = event.get('cmd', '')
+        output = event.get('output', '')
+        base = command_base(cmd)
+        if not base:
+            continue
+        if is_command_failure(output, base):
+            total_fail += 1
+            failure_rank[base] = failure_rank.get(base, 0) + 1
+        else:
+            total_success += 1
+            success_rank[base] = success_rank.get(base, 0) + 1
+
+    for event in blocked_events[-6:]:
+        base = command_base(event.get('cmd', ''))
+        if base:
+            failure_rank[base] = failure_rank.get(base, 0) + 1
+            total_fail += 1
+
+    top_success = sorted(success_rank.items(), key=lambda x: x[1], reverse=True)[:3]
+    top_fail = sorted(failure_rank.items(), key=lambda x: x[1], reverse=True)[:3]
+
+    focus_terms = [task]
+    focus_terms.extend(cmd for cmd, _ in top_fail)
+    focus_query = ' '.join(t for t in focus_terms if t).strip()
+    dynamic_skills = skills_context(focus_query, limit=5)
+    mem_ctx = memory_context(mem)
+
+    lines = [
+        f'ROUND REVIEW @ turn {turn}',
+        f'- Successes in recent window: {total_success}',
+        f'- Failures in recent window: {total_fail}',
+    ]
+    if top_success:
+        lines.append('- Ranked successes: ' + ', '.join(f'{cmd} ({count})' for cmd, count in top_success))
+    if top_fail:
+        lines.append('- Ranked failures: ' + ', '.join(f'{cmd} ({count})' for cmd, count in top_fail))
+
+    if mem_ctx:
+        lines.append('\nUse this memory to choose your next approach (prefer known-good methods):')
+        lines.append(mem_ctx)
+
+    if dynamic_skills:
+        lines.append('\nUse these retrieved skills that match current failures/task:')
+        lines.append(dynamic_skills)
+
+    lines.append('\nNow pick ONE command that addresses the top-ranked failure using memory/skills evidence.')
+    return '\n'.join(lines)
+
+
+def summarize_resume_session(resume_data, task, mem=None):
+    """Build a compact, safe summary for resuming into a fresh shell."""
+    prior_task = resume_data.get('task', '(unknown)')
+    previous_turns = resume_data.get('turns', 0)
+    log = resume_data.get('log', []) or []
+    last_execs = [e for e in log if e.get('type') == 'exec'][-3:]
+
+    lines = [
+        'PREVIOUS SESSION SUMMARY:',
+        f'- Prior task: {prior_task}',
+        f'- Turns completed: {previous_turns}',
+        '- Important: the shell is fresh. Do not assume any previous shell state, temporary files, or environment variables still exist.',
+        '- Use the prior session as reference only and continue with one new command.',
+    ]
+
+    if task and task != prior_task:
+        lines.append(f'- New follow-up task: {task}')
+
+    if last_execs:
+        lines.append('\nRecent executed commands:')
+        for event in last_execs:
+            cmd = event.get('cmd', '<unknown>')
+            out_lines = (event.get('output') or '').strip().splitlines()
+            out_excerpt = out_lines[0] if out_lines else '[no output]'
+            if len(out_excerpt) > 120:
+                out_excerpt = out_excerpt[:117] + '...'
+            lines.append(f'  - {cmd}')
+            lines.append(f'    Output: {out_excerpt}')
+
+    if mem:
+        mem_ctx = memory_context(mem)
+        if mem_ctx:
+            lines.append('\nKnown memory from previous sessions:')
+            lines.append(mem_ctx)
+
+    lines.append('\nNow continue from this fresh shell, using the above as reference. Do not repeat old commands unless they are still clearly relevant.')
+    return '\n'.join(lines)
+
+
+def build_resume_message(resume_data, task, mem=None):
+    """Create the user message that resumes a previous session."""
+    return summarize_resume_session(resume_data, task, mem)
+
+
 # ─── Session Persistence ─────────────────────────────────────
 
 def save_session(task, provider_name, turn_count, messages, log, mem, session_id=None):
@@ -658,11 +859,9 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
 
     # Resume or fresh start
     if resume_data:
-        messages = resume_data.get('messages', [])
         log = resume_data.get('log', [])
         turn_count = resume_data.get('turns', 0)
         session_id = resume_data.get('timestamp')
-        # Merge any memory from the saved session
         saved_mem = resume_data.get('memory', {})
         for k in ['facts', 'notes']:
             for item in saved_mem.get(k, []):
@@ -670,17 +869,20 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                     mem.setdefault(k, []).append(item)
         for k in ['networks', 'credentials']:
             mem.setdefault(k, {}).update(saved_mem.get(k, {}))
-        if task:
-            messages.append({
-                'role': 'user',
-                'content': f'New follow-up task: {task}\n\nContinue from where you left off. The shell is fresh but you have the full conversation history.',
-            })
-        print(f'\n  ♻️  Resumed session ({turn_count} previous turns)')
+
+        resume_task = task or resume_data.get('task', '')
+        messages = [{'role': 'user', 'content': build_resume_message(resume_data, resume_task, mem)}]
+        if task and task != resume_data.get('task', ''):
+            messages.append({'role': 'user', 'content': f'New follow-up task: {task}'})
+        print(f'\n  ♻️  Resumed session ({turn_count} previous turns, fresh shell)')
     else:
         messages = []
         log = []
         turn_count = 0
         session_id = None
+
+    # Trigger periodic self-review every random 3-6 turns.
+    next_review_turn = random.randint(3, 6)
 
     print(f'\n{"="*60}')
     print(f'  BARE METAL AGENT')
@@ -703,6 +905,13 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
         for turn in range(1, max_turns + 1):
             turn_count = turn
             print(f'\n{"─"*25} Turn {turn} {"─"*25}')
+
+            if turn >= next_review_turn:
+                review = build_round_review(turn, log, mem, task)
+                if review:
+                    print('\n📊 Periodic review injected (ranked success/failure + memory/skills retrieval)')
+                    messages.append({'role': 'user', 'content': review})
+                next_review_turn = turn + random.randint(3, 6)
 
             # ── LLM thinks ──
             t_llm_start = time.time()
@@ -740,25 +949,15 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
 
             # ── Repeat-command loop-breaker ──
             # Strip wrappers (sudo / timeout N) to get the real tool name
-            def _tool_base(c):
-                parts = c.strip().split()
-                i = 0
-                if i < len(parts) and parts[i] in ('sudo', 'su'):
-                    i += 1
-                if i < len(parts) and parts[i] == 'timeout' and i + 1 < len(parts) and parts[i+1].isdigit():
-                    i += 2
-                if i < len(parts) and parts[i] in ('sudo',):
-                    i += 1
-                return parts[i] if i < len(parts) else ''
-            cmd_base = _tool_base(cmd)
-            recent_bases = [
-                _tool_base(e['cmd'])
-                for e in log[-10:] if e.get('type') == 'exec' and e.get('cmd', '').strip()
+            cmd_base = command_base(cmd)
+            recent_failures = [
+                command_base(e['cmd'])
+                for e in log[-10:]
+                if e.get('type') == 'exec' and e.get('cmd', '').strip() and is_command_failure(e.get('output', ''), command_base(e['cmd']))
             ]
-            # aireplay-ng legitimately needs multiple runs (capture + deauth); allow up to 3
-            loop_threshold = 3 if cmd_base in ('aireplay-ng', 'aircrack-ng') else 2
-            if cmd_base and recent_bases.count(cmd_base) >= loop_threshold:
-                print(f'\n⚠️  Loop detected: `{cmd_base}` failed {recent_bases.count(cmd_base)} times, injecting hard redirect')
+            loop_threshold = 5 if cmd_base == 'expect' else 4 if cmd_base in ('aireplay-ng', 'aircrack-ng') else 3
+            if cmd_base and recent_failures.count(cmd_base) >= loop_threshold:
+                print(f'\n⚠️  Loop detected: `{cmd_base}` failed {recent_failures.count(cmd_base)} times, injecting hard redirect')
                 messages.append({
                     'role': 'user',
                     'content': f'STOP. Every `{cmd_base}` command has failed. That tool is not working. Do NOT use `{cmd_base}` again. Try a completely different tool or approach.',
