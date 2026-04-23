@@ -1083,6 +1083,9 @@ Then I will reply with the real output, and you decide the next step."""
 
 
 def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
+    from ui_modal import init_ui
+    ui = init_ui()
+
     shell = Shell()
     mem = load_memory()
     techniques = load_techniques()
@@ -1284,12 +1287,13 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                     messages.append({'role': 'user', 'content': f'Command BLOCKED (dangerous: {dangerous}). Try a different approach that does not involve destructive operations.'})
                     log.append({'turn': turn, 'type': 'blocked', 'cmd': cmd, 'reason': dangerous, 'ts': time.time()})
                     continue
-                choice = input('  [↵]=allow  [s]=skip  [t]=steer  [q]=quit  › ').strip().lower()
+                options = [('↵', 'allow'), ('s', 'skip'), ('t', 'steer'), ('q', 'quit')]
+                choice = ui.show_command_prompt(cmd, options).strip().lower()
                 if choice == 'q':
                     print('  ✗ Aborted.')
                     break
                 if choice == 't':
-                    steer_line = input('  ↳ Steer: ').strip()
+                    steer_line = ui.show_prompt('  ↳ Steer: ')
                     if steer_line:
                         steer_content = f'[OPERATOR OVERRIDE] Stop your current plan. {steer_line}'
                         messages.append({'role': 'user', 'content': steer_content})
@@ -1303,7 +1307,8 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                 # ── Normal human gate ──
                 print(f'\n {_ORG}⏺{_RST} bash ({cmd})')
                 _confirmed_display = True
-                choice = input('  [↵]=run  [s]=skip  [t]=steer  [q]=quit  [a]=auto  › ').strip().lower()
+                options = [('↵', 'run'), ('s', 'skip'), ('t', 'steer'), ('q', 'quit'), ('a', 'auto')]
+                choice = ui.show_command_prompt(cmd, options).strip().lower()
                 if choice == 'q':
                     print('  ✗ Aborted.')
                     break
@@ -1312,7 +1317,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                     log.append({'turn': turn, 'type': 'skip', 'cmd': cmd, 'ts': time.time()})
                     continue
                 if choice == 't':
-                    steer_line = input('  ↳ Steer: ').strip()
+                    steer_line = ui.show_prompt('  ↳ Steer: ')
                     if steer_line:
                         steer_content = f'[OPERATOR OVERRIDE] Stop your current plan. {steer_line}'
                         messages.append({'role': 'user', 'content': steer_content})
@@ -1402,26 +1407,12 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                 print(f'\n {_ORG}⏺{_RST} bash ({cmd})')
                 # Auto mode: brief 1.5s window to steer before executing
                 if not confirm and sys.stdin.isatty():
-                    print(f'  {_DIM}[t]=steer  [q]=quit  auto…{_RST}', end='', flush=True)
-                    fd = sys.stdin.fileno()
-                    old_term = termios.tcgetattr(fd)
-                    ch = ''
-                    try:
-                        tty.setraw(fd)
-                        rlist, _, _ = select.select([sys.stdin], [], [], 1.5)
-                        if rlist:
-                            ch = sys.stdin.read(1)
-                    except Exception:
-                        pass
-                    finally:
-                        termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
-                    sys.stdout.write('\r\033[K')
-                    sys.stdout.flush()
+                    ch = ui.show_steer_window(timeout_s=1.5)
                     if ch.lower() == 'q':
                         print('  ✗ Aborted.')
                         break
                     if ch.lower() == 't':
-                        steer_line = input('  ↳ Steer: ').strip()
+                        steer_line = ui.show_prompt('  ↳ Steer: ')
                         if steer_line:
                             steer_content = f'[OPERATOR OVERRIDE] Stop your current plan. {steer_line}'
                             messages.append({'role': 'user', 'content': steer_content})
@@ -1591,6 +1582,9 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
     session_file = save_session(task, provider.name, turn_count, messages, log, mem, token_totals, session_id)
     print(f'\n  {_GRN}✓{_RST} Session saved: {session_file}')
     print(f'  {_DIM}↩ Resume: python agent.py --resume {session_file}{_RST}')
+    # Cleanup UI
+    ui.cleanup()
+
     # Auto-extract learnings — runs silently after every session
     try:
         from extract_learnings import learn_from_session
