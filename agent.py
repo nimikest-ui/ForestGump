@@ -33,6 +33,7 @@ import select
 import fcntl
 import struct
 import termios
+import tty
 import subprocess
 import time
 import re
@@ -42,6 +43,7 @@ import uuid
 import signal
 import glob
 import random
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -51,6 +53,127 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 SESSIONS_DIR = SCRIPT_DIR / 'sessions'
 MEMORY_FILE = SCRIPT_DIR / 'memory.json'
 TECHNIQUES_FILE = SCRIPT_DIR / 'techniques.json'
+
+# ─── UI / Display ─────────────────────────────────────────────
+
+_DIM = '\033[2m'
+_RST = '\033[0m'
+_BLD = '\033[1m'
+_GRN = '\033[32m'
+_RED = '\033[31m'
+_YLW = '\033[33m'
+_ORG = '\033[38;5;208m'   # Claude Code orange accent
+
+# ── Bottom status bar state ──────────────────────────────────
+_bar_active = False
+_bar_state  = {'mode': 'manual', 'session_tok': 0, 'turn': 0, 'action': ''}
+
+
+def _ansi_strip(s):
+    return re.sub(r'\033\[[^m]*m', '', s)
+
+
+def _bar_render():
+    if not _bar_active:
+        return
+    try:
+        size = os.get_terminal_size()
+        rows, cols = size.lines, size.columns
+    except Exception:
+        return
+
+    mode = _bar_state['mode']
+    tok  = _bar_state['session_tok']
+    turn = _bar_state['turn']
+    act  = _bar_state['action']
+
+    mode_fmt = f'{_ORG}auto{_RST}' if mode == 'auto' else f'{_DIM}manual{_RST}'
+    turn_fmt = f'{_DIM}turn {turn}{_RST}' if turn else ''
+    tok_fmt  = f'{_DIM}{tok:,} tok{_RST}'
+    hr       = f'{_DIM}{"─" * cols}{_RST}'
+
+    center      = f'{turn_fmt}  {mode_fmt}' if turn_fmt else mode_fmt
+    act_len     = len(_ansi_strip(act))
+    center_len  = len(_ansi_strip(center))
+    tok_len     = len(_ansi_strip(tok_fmt))
+    space       = cols - act_len - center_len - tok_len - 4
+    pad_l       = max(1, space // 2)
+    pad_r       = max(1, space - pad_l)
+    line2       = f' {act}{" " * pad_l}{center}{" " * pad_r}{tok_fmt} '
+
+    sys.stdout.write(
+        '\033[s'
+        f'\033[{rows - 1};1H\033[2K{hr}'
+        f'\033[{rows};1H\033[2K{line2}'
+        '\033[u'
+    )
+    sys.stdout.flush()
+
+
+def _bar_setup():
+    global _bar_active
+    try:
+        rows = os.get_terminal_size().lines
+        sys.stdout.write(f'\033[1;{rows - 2}r')
+        sys.stdout.flush()
+        _bar_active = True
+        _bar_render()
+    except Exception:
+        pass
+
+
+def _bar_teardown():
+    global _bar_active
+    _bar_active = False
+    try:
+        rows = os.get_terminal_size().lines
+        sys.stdout.write(
+            f'\033[1;{rows}r'
+            f'\033[{rows - 1};1H\033[2K'
+            f'\033[{rows};1H\033[2K'
+        )
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def _bar_update(**kwargs):
+    _bar_state.update(kwargs)
+    _bar_render()
+
+
+class Spinner:
+    _FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+
+    def __init__(self, msg='Thinking'):
+        self._msg = msg
+        self._stop  = threading.Event()
+        self._thread = None
+        self._t0     = 0.0
+
+    def start(self):
+        self._stop.clear()
+        self._t0 = time.time()
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join()
+        sys.stdout.write('\r\033[K')
+        sys.stdout.flush()
+
+    def _spin(self):
+        i = 0
+        while not self._stop.is_set():
+            elapsed = time.time() - self._t0
+            frame   = self._FRAMES[i % len(self._FRAMES)]
+            line    = f'\r  {_ORG}{frame}{_RST} {self._msg} for {elapsed:.1f}s…'
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            i += 1
+            time.sleep(0.1)
 
 
 # ─── Utilities ────────────────────────────────────────────────
@@ -653,6 +776,16 @@ def is_command_failure(output, cmd_base=''):
         return False
 
     fail_markers = [
+        # HTTP response bodies (curl -s output)
+        '<title>404',
+        '<title>403',
+        '<title>500',
+        '<h1>not found</h1>',
+        'the requested url was not found',
+        '404 not found',
+        '403 forbidden',
+        '500 internal server',
+        # Command failures
         'command not found',
         'no such file',
         'permission denied',
@@ -666,6 +799,65 @@ def is_command_failure(output, cmd_base=''):
         'invalid',
     ]
     return any(marker in eval_out for marker in fail_markers)
+
+
+def extract_decision_token_for_review(cmd):
+    """Extract decision token (URL path, key flag, target) from command."""
+    # For curl: URL path
+    url_m = re.search(r'https?://[^/\s]+(/[^\s]*)', cmd)
+    if url_m:
+        return url_m.group(1)
+    # For other tools: last non-flag arg
+    parts = cmd.split()
+    for p in reversed(parts):
+        if not p.startswith('-'):
+            return p[:40]
+    return cmd[:30]
+
+
+def extract_intent_for_review(thought_text, cmd):
+    """Extract key intent phrase that drove the decision."""
+    path = extract_decision_token_for_review(cmd)
+    if not path:
+        return thought_text.split('.')[0][:70]
+    # Look for sentence with the path/arg
+    sentences = re.split(r'(?<=[.!?])\s+', thought_text)
+    path_name = path.split('/')[-1]
+    for s in sentences:
+        if path_name and path_name in s:
+            return s[:70]
+    return sentences[0][:70] if sentences else thought_text[:70]
+
+
+def classify_output_for_review(output, cmd):
+    """Label output as SOLVE / KEY / OK / BAD."""
+    if not output:
+        return '✗'
+    out = output.lower()
+    # Password found
+    if re.search(r'natas\d+:[a-z0-9]{20,}', out, re.I):
+        return '✓SOLVE'
+    # Key finding
+    if any(x in out for x in ['disallow:', 'index of', 'password', 'key:', 'secret']):
+        return '✓KEY'
+    # Failure
+    if is_command_failure(output):
+        return '✗BAD'
+    return '✓'
+
+
+def output_signal_for_review(output):
+    """Extract first meaningful output line."""
+    lines = (output or '').strip().split('\n')
+    for line in lines:
+        line = line.strip()
+        if line and not line.startswith('<'):
+            return line[:50]
+        if '<title>' in line:
+            m = re.search(r'<title>([^<]+)</title>', line)
+            if m:
+                return m.group(1)[:50]
+    return lines[0][:50] if lines else '[empty]'
 
 
 def build_round_review(turn, log, mem, task):
@@ -715,6 +907,23 @@ def build_round_review(turn, log, mem, task):
         f'- Successes in recent window: {total_success}',
         f'- Failures in recent window: {total_fail}',
     ]
+
+    # Add causal chain (last 5 turns, intent → token → signal → label)
+    if exec_events:
+        lines.append('\nCAUSAL CHAIN (recent turns):')
+        thought_map = {e.get('turn'): e for e in log if e.get('type') == 'thought'}
+        for event in exec_events[-5:]:
+            evt_turn = event.get('turn')
+            thought_entry = thought_map.get(evt_turn, {})
+            thought_text = thought_entry.get('content', 'unknown')
+            cmd = event.get('cmd', '')
+            output = event.get('output', '')
+            intent = extract_intent_for_review(thought_text, cmd)
+            token = extract_decision_token_for_review(cmd)
+            signal = output_signal_for_review(output)
+            label = classify_output_for_review(output, cmd)
+            lines.append(f'  T{evt_turn}: {intent:25s} → {token:25s} → {signal:30s} {label}')
+
     if top_success:
         lines.append('- Ranked successes: ' + ', '.join(f'{cmd} ({count})' for cmd, count in top_success))
     if top_fail:
@@ -737,14 +946,15 @@ def summarize_resume_session(resume_data, task, mem=None):
     prior_task = resume_data.get('task', '(unknown)')
     previous_turns = resume_data.get('turns', 0)
     log = resume_data.get('log', []) or []
-    last_execs = [e for e in log if e.get('type') == 'exec'][-3:]
+    last_execs = [e for e in log if e.get('type') == 'exec'][-8:]
 
     lines = [
         'PREVIOUS SESSION SUMMARY:',
         f'- Prior task: {prior_task}',
-        f'- Turns completed: {previous_turns}',
+        f'- Turns completed: {previous_turns} (do NOT infer progress or level from turn count)',
         '- Important: the shell is fresh. Do not assume any previous shell state, temporary files, or environment variables still exist.',
         '- Use the prior session as reference only and continue with one new command.',
+        '- Do NOT assume what level/stage was reached — infer only from the commands and output shown below.',
     ]
 
     if task and task != prior_task:
@@ -907,7 +1117,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
         messages = [{'role': 'user', 'content': build_resume_message(resume_data, resume_task, mem)}]
         if task and task != resume_data.get('task', ''):
             messages.append({'role': 'user', 'content': f'New follow-up task: {task}'})
-        print(f'\n  ♻️  Resumed session ({turn_count} previous turns, fresh shell)')
+        print(f'\n  {_DIM}↩ Resumed ({turn_count} previous turns, fresh shell){_RST}')
     else:
         messages = []
         log = []
@@ -917,14 +1127,18 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
     # Trigger periodic self-review every random 3-6 turns.
     next_review_turn = random.randint(3, 6)
 
-    print(f'\n{"="*60}')
-    print(f'  BARE METAL AGENT')
-    print(f'  Provider : {provider.name}')
-    print(f'  Task     : {task}')
-    print(f'  Confirm  : {"yes" if confirm else "no (YOLO)"}')
+    print(f'\n {_ORG}●{_RST} {_BLD}Agent{_RST}  {provider.name}')
+    task_preview = task[:80] + ('…' if len(task) > 80 else '')
+    print(f'  {_DIM}Task   {_RST}{task_preview}')
     if mem.get('networks') or mem.get('credentials'):
-        print(f'  Memory   : {len(mem.get("networks", {}))} networks, {len(mem.get("credentials", {}))} creds')
-    print(f'{"="*60}\n')
+        print(f'  {_DIM}Memory {_RST}{len(mem.get("networks", {}))} networks, {len(mem.get("credentials", {}))} creds')
+    print()
+
+    # Start persistent bottom bar
+    _bar_state['mode'] = 'auto' if not confirm else 'manual'
+    _bar_state['session_tok'] = 0
+    _bar_state['turn'] = 0
+    _bar_setup()
 
     # Inject memory into first message if fresh start
     if not resume_data:
@@ -940,7 +1154,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
 
         for turn in range(1, max_turns + 1):
             turn_count = turn
-            print(f'\n{"─"*25} Turn {turn} {"─"*25}')
+            _bar_update(turn=turn, action='')
 
             # ── Between-turn steer check ──
             # Non-blocking: picks up anything the user typed while last command ran.
@@ -950,35 +1164,40 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                 if rlist:
                     steer_line = sys.stdin.readline().strip()
                     if steer_line:
-                        print(f'\n💬 Steering injected: {steer_line}')
-                        messages.append({'role': 'user', 'content': steer_line})
+                        print(f'  {_DIM}↳ Steering: {steer_line}{_RST}')
+                        steer_content = f'[OPERATOR OVERRIDE] Stop your current plan. {steer_line}'
+                        messages.append({'role': 'user', 'content': steer_content})
                         log.append({'turn': turn, 'type': 'steer', 'content': steer_line, 'ts': time.time()})
 
             if turn >= next_review_turn:
                 review = build_round_review(turn, log, mem, task)
                 if review:
-                    print('\n📊 Periodic review injected (ranked success/failure + memory/skills retrieval)')
+                    print(f'  {_DIM}↺ Review{_RST}')
                     messages.append({'role': 'user', 'content': review})
                 next_review_turn = turn + random.randint(3, 6)
 
             # ── LLM thinks ──
             t_llm_start = time.time()
+            _spinner = Spinner()
+            _spinner.start()
             try:
                 response, usage = provider.chat(messages, full_system)
+                _spinner.stop()
             except Exception as e:
-                print(f'\n❌ Provider error: {e}')
+                _spinner.stop()
+                print(f'\n  {_RED}✗{_RST} Provider error: {e}')
                 break
             t_thought = time.time()
             llm_inference = round(t_thought - t_llm_start, 1)
 
-            # Accumulate token counts
             if usage:
                 token_totals['input_tokens'] += usage.get('input_tokens', 0)
                 token_totals['output_tokens'] += usage.get('output_tokens', 0)
+                _bar_update(session_tok=token_totals['input_tokens'] + token_totals['output_tokens'])
 
-            # Display agent response with token info
-            tok_str = f" | {usage['input_tokens']}in/{usage['output_tokens']}out tok" if usage else ''
-            print(f'\n🤖 Agent: [llm={llm_inference}s{tok_str}]\n{response}')
+            tok_str = f' · {usage["input_tokens"]} in / {usage["output_tokens"]} out' if usage else ''
+            print(f'\n{response}')
+            print(f'{_DIM}  ↳ {llm_inference}s{tok_str}{_RST}')
             messages.append({'role': 'assistant', 'content': response})
             log.append({'turn': turn, 'type': 'thought', 'content': response, 'tokens': usage, 'ts': t_thought, 'llm_s': llm_inference})
 
@@ -986,9 +1205,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
             done_m = re.search(r'<done>(.*?)</done>', response, re.DOTALL)
             if done_m:
                 summary = done_m.group(1).strip()
-                print(f'\n{"="*60}')
-                print(f'  ✅ DONE ({turn} turns): {summary}')
-                print(f'{"="*60}')
+                print(f'\n  {_GRN}✓{_RST} Done in {turn} turns — {summary}')
                 break
 
             # ── Extract command ──
@@ -1021,7 +1238,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
 
             loop_threshold = 4 if cmd_base in ('aireplay-ng', 'aircrack-ng') else 3
             if cmd_base and consecutive_failures >= loop_threshold:
-                print(f'\n⚠️  Loop detected: `{cmd_base}` failed {consecutive_failures}× in a row, injecting hard redirect')
+                print(f'\n  {_YLW}⚡{_RST} Loop break — `{cmd_base}` failed {consecutive_failures}× in a row')
                 messages.append({
                     'role': 'user',
                     'content': (
@@ -1032,32 +1249,50 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                 log.append({'turn': turn, 'type': 'loop_break', 'cmd': cmd, 'ts': time.time()})
                 continue
 
+            # ── Secondary loop-breaker: repeated 404 responses ──
+            # Catches cases where curl keeps hitting dead URLs (different URLs but same 404 failure).
+            recent_execs = [e for e in reversed(log) if e.get('type') == 'exec'][:5]
+            recent_404s = sum(1 for e in recent_execs if '404' in (e.get('output') or '').lower())
+            if recent_404s >= 3:
+                print(f'\n  {_YLW}⚡{_RST} HTTP loop — last {recent_404s} responses were 404')
+                messages.append({
+                    'role': 'user',
+                    'content': (
+                        f'STOP. Last {recent_404s} web requests returned 404 Not Found. '
+                        f'The paths you are trying do not exist. Change strategy: try a different discovery method or '
+                        f'reconsider what the target structure might be.'
+                    ),
+                })
+                log.append({'turn': turn, 'type': 'loop_break', 'cmd': cmd, 'reason': f'{recent_404s}x 404', 'ts': time.time()})
+                continue
+
             # ── Sanitize command (rewrite background patterns) ──
+            _confirmed_display = False
             original_cmd = cmd
             cmd = sanitize_command(cmd)
             if cmd != original_cmd:
-                print(f'\n♻️  Rewritten: {cmd}')
+                print(f'  {_DIM}↻ Rewritten: {cmd}{_RST}')
 
             # ── Destructive command guard (always triggers even in auto mode) ──
             dangerous = is_dangerous(cmd)
 
             if dangerous:
-                print(f'\n🛑 DANGEROUS: {dangerous}')
-                print(f'   Command: {cmd}')
+                print(f'\n  {_RED}⊘{_RST} Blocked — {dangerous}')
+                print(f'  {_DIM}$ {cmd}{_RST}')
                 if not confirm:
-                    # In YOLO mode, dangerous commands are auto-blocked (never auto-allowed)
-                    print('  [auto-blocked in --no-confirm mode]')
+                    print(f'  {_DIM}auto-blocked (no-confirm mode){_RST}')
                     messages.append({'role': 'user', 'content': f'Command BLOCKED (dangerous: {dangerous}). Try a different approach that does not involve destructive operations.'})
                     log.append({'turn': turn, 'type': 'blocked', 'cmd': cmd, 'reason': dangerous, 'ts': time.time()})
                     continue
-                choice = input('  [Enter]=allow  [s]=skip  [t]=steer  [q]=quit  > ').strip().lower()
+                choice = input('  [↵]=allow  [s]=skip  [t]=steer  [q]=quit  › ').strip().lower()
                 if choice == 'q':
-                    print('Aborted.')
+                    print('  ✗ Aborted.')
                     break
                 if choice == 't':
-                    steer_line = input('  💬 Steer message: ').strip()
+                    steer_line = input('  ↳ Steer: ').strip()
                     if steer_line:
-                        messages.append({'role': 'user', 'content': steer_line})
+                        steer_content = f'[OPERATOR OVERRIDE] Stop your current plan. {steer_line}'
+                        messages.append({'role': 'user', 'content': steer_content})
                         log.append({'turn': turn, 'type': 'steer', 'content': steer_line, 'ts': time.time()})
                     continue  # re-run LLM with steer message
                 if choice == 's' or choice != '':
@@ -1066,36 +1301,41 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                     continue
             elif confirm:
                 # ── Normal human gate ──
-                print(f'\n⚡ Proposed command: {cmd}')
-                choice = input('  [Enter]=run  [s]=skip  [t]=steer  [q]=quit  [a]=auto-approve  > ').strip().lower()
+                print(f'\n {_ORG}⏺{_RST} bash ({cmd})')
+                _confirmed_display = True
+                choice = input('  [↵]=run  [s]=skip  [t]=steer  [q]=quit  [a]=auto  › ').strip().lower()
                 if choice == 'q':
-                    print('Aborted.')
+                    print('  ✗ Aborted.')
                     break
                 if choice == 's':
                     messages.append({'role': 'user', 'content': 'Command skipped by operator. Try a different approach.'})
                     log.append({'turn': turn, 'type': 'skip', 'cmd': cmd, 'ts': time.time()})
                     continue
                 if choice == 't':
-                    steer_line = input('  💬 Steer message: ').strip()
+                    steer_line = input('  ↳ Steer: ').strip()
                     if steer_line:
-                        messages.append({'role': 'user', 'content': steer_line})
+                        steer_content = f'[OPERATOR OVERRIDE] Stop your current plan. {steer_line}'
+                        messages.append({'role': 'user', 'content': steer_content})
                         log.append({'turn': turn, 'type': 'steer', 'content': steer_line, 'ts': time.time()})
                     continue  # re-run LLM with steer message before executing any command
                 if choice == 'a':
                     confirm = False
+                    _bar_update(mode='auto')
+            else:
+                _confirmed_display = False
 
             # ── wlan1 liveness check before wireless tools ──
             if re.search(r'\b(airodump-ng|aireplay-ng|aircrack-ng)\b', cmd):
                 import pathlib as _pl
                 wlan1_ok = _pl.Path('/sys/class/net/wlan1').exists()
                 if not wlan1_ok:
-                    print('\n⚠️  wlan1 interface not found — check USB adapter')
+                    print(f'\n  {_YLW}⚠{_RST} wlan1 not found — check USB adapter')
                     output = '[wlan1 interface missing. The USB WiFi adapter may have crashed or been unplugged. Run: sudo iw dev; and re-insert the adapter if needed.]'
                     t_exec_start = t_exec_end = time.time()
                     elapsed = 0.0
                     display = output
                     context = output
-                    print(f'\n📟 Output: [exec=0s]\n{display}')
+                    print(f'  {_DIM}✓ 0s{_RST}\n\n{display}')
                     messages.append({'role': 'user', 'content': f'Terminal output:\n```\n{context}\n```'})
                     log.append({'turn': turn, 'type': 'exec', 'cmd': cmd, 'output': output, 'ts': time.time(), 'exec_s': 0.0})
                     continue
@@ -1123,7 +1363,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                 if not re.search(r'\btimeout\s+\d+', cmd):
                     inner = re.sub(r'^sudo\s+', '', cmd)
                     cmd = f'sudo timeout 20 {inner}'
-                    print(f'\n⏱️  airodump-ng: auto-wrapped → {cmd}')
+                    print(f'  {_DIM}↻ timeout wrap: {cmd}{_RST}')
                 # Remove invalid channel flags (airodump-ng doesn't accept -c 0 or --channel 0)
                 cmd = re.sub(r'\s+(?:-c|--channel)\s+0\b', '', cmd)
                 # Detect cap-only mode (no CSV will be written)
@@ -1132,7 +1372,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                 # Ensure wlan1 is last arg (model sometimes omits it)
                 if not re.search(r'\bwlan\d\b', cmd):
                     cmd = cmd.rstrip() + ' wlan1'
-                    print(f'\n🔧 Auto-appended wlan1: {cmd}')
+                    print(f'  {_DIM}↻ appended wlan1: {cmd}{_RST}')
 
             # ── aireplay-ng special handling ──
             is_aireplay = bool(re.search(r'\baireplay-ng\b', cmd))
@@ -1143,7 +1383,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                 if not re.search(r'\btimeout\s+\d+', cmd):
                     inner = re.sub(r'^sudo\s+', '', cmd)
                     cmd = f'sudo timeout 30 {inner}'
-                    print(f'\n⏱️  nmap: auto-wrapped with timeout → {cmd}')
+                    print(f'  {_DIM}↻ timeout wrap: {cmd}{_RST}')
 
             # ── Bluetooth-related command detection ──
             # Detect safe Bluetooth tools that work in subprocess
@@ -1151,12 +1391,42 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
             if is_bluetooth:
                 adapters = get_bluetooth_adapters()
                 if not adapters:
-                    print(f'\n⚠️  No Bluetooth adapters found in /sys/class/bluetooth/')
+                    print(f'\n  {_YLW}⚠{_RST} No Bluetooth adapters in /sys/class/bluetooth/')
                 else:
-                    print(f'\n📡 Bluetooth adapter online: {adapters[0]}')
+                    print(f'  {_DIM}Bluetooth: {adapters[0]}{_RST}')
 
             # ── Execute ──
-            print(f'\n⚡ Executing: {cmd}')
+            cmd_preview = cmd[:60] + ('…' if len(cmd) > 60 else '')
+            _bar_update(action=f'{_ORG}⏺{_RST} bash ({cmd_preview})')
+            if not _confirmed_display:
+                print(f'\n {_ORG}⏺{_RST} bash ({cmd})')
+                # Auto mode: brief 1.5s window to steer before executing
+                if not confirm and sys.stdin.isatty():
+                    print(f'  {_DIM}[t]=steer  [q]=quit  auto…{_RST}', end='', flush=True)
+                    fd = sys.stdin.fileno()
+                    old_term = termios.tcgetattr(fd)
+                    ch = ''
+                    try:
+                        tty.setraw(fd)
+                        rlist, _, _ = select.select([sys.stdin], [], [], 1.5)
+                        if rlist:
+                            ch = sys.stdin.read(1)
+                    except Exception:
+                        pass
+                    finally:
+                        termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
+                    sys.stdout.write('\r\033[K')
+                    sys.stdout.flush()
+                    if ch.lower() == 'q':
+                        print('  ✗ Aborted.')
+                        break
+                    if ch.lower() == 't':
+                        steer_line = input('  ↳ Steer: ').strip()
+                        if steer_line:
+                            steer_content = f'[OPERATOR OVERRIDE] Stop your current plan. {steer_line}'
+                            messages.append({'role': 'user', 'content': steer_content})
+                            log.append({'turn': turn, 'type': 'steer', 'content': steer_line, 'ts': time.time()})
+                        continue
 
             if is_aireplay:
                 # aireplay-ng also hangs PTY (raw sockets + curses) — run via subprocess
@@ -1263,14 +1533,14 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                         p = pathlib.Path(cap_file)
                         if p.exists() and p.stat().st_size > 100:
                             output = f'[airodump-ng cap capture complete: {cap_file} ({p.stat().st_size} bytes). Use aircrack-ng to analyse.]'
-                            print(f'\n📦 Cap written: {cap_file} ({p.stat().st_size}B)')
+                            print(f'  {_DIM}✓ cap: {cap_file} ({p.stat().st_size}B){_RST}')
                         else:
                             output = f'[airodump-ng ran for {elapsed}s but no cap at {cap_file}. No handshake captured yet — try deauth with aireplay-ng first.]'
                     else:
                         csv_file = f'{airodump_csv_path}-01.csv'
                         p = pathlib.Path(csv_file)
                         if p.exists() and p.stat().st_size > 50:
-                            print(f'\n📄 Auto-read CSV: {csv_file}')
+                            print(f'  {_DIM}✓ csv: {csv_file}{_RST}')
                             output = p.read_text(errors='replace').strip()
                         else:
                             output = f'[airodump-ng ran for {elapsed}s but no CSV at {csv_file}. Networks may be out of range, or wlan1 is not in monitor mode.]'
@@ -1281,16 +1551,23 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
             elif not is_airodump and not is_aireplay and not is_bluetooth and not is_nmap:
                 clean = output.replace('echo', '').replace('[command timed out]', '').strip()
                 if not clean or clean == 'echo':
-                    print('\n⚠️  Empty output — resetting shell')
+                    print(f'  {_DIM}↻ empty output, shell reset{_RST}')
                     shell.close()
                     shell = Shell()
                     output = f'[command returned no output after {cmd_timeout}s — the shell has been reset.]'
 
-            # Truncate massive output for display and context
-            display = output[:5000] + ('\n... [truncated]' if len(output) > 5000 else '')
+            # Compact display: 5 lines max, full context for LLM
             context = output[:12000] + ('\n... [truncated]' if len(output) > 12000 else '')
+            lines   = output.splitlines()
+            if len(lines) > 5:
+                display = '\n'.join(lines[:5]) + f'\n{_DIM}  … {len(lines) - 5} more lines{_RST}'
+            else:
+                display = output
 
-            print(f'\n📟 Output: [exec={elapsed}s]\n{display}')
+            print(f'  {_DIM}✓ {elapsed}s{_RST}')
+            if display.strip():
+                print(f'\n{display}\n')
+            _bar_update(action=f'{_GRN}✓{_RST} bash ({elapsed}s)')
             messages.append({'role': 'user', 'content': f'Terminal output:\n```\n{context}\n```'})
             log.append({'turn': turn, 'type': 'exec', 'cmd': cmd, 'output': output[:12000], 'ts': t_exec_start, 'exec_s': elapsed})
 
@@ -1298,8 +1575,9 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
             mem = extract_memory_updates(response, output, cmd, mem)
 
     except KeyboardInterrupt:
-        print('\n\n⛔ Interrupted by operator.')
+        print('\n\n  ✗ Interrupted.')
     finally:
+        _bar_teardown()
         shell.close()
 
     # ── Save memory ──
@@ -1311,8 +1589,8 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
 
     # ── Save session (for resume) ──
     session_file = save_session(task, provider.name, turn_count, messages, log, mem, token_totals, session_id)
-    print(f'\n📝 Session saved: {session_file}')
-    print(f'   Resume with: python agent.py --resume {session_file}')
+    print(f'\n  {_GRN}✓{_RST} Session saved: {session_file}')
+    print(f'  {_DIM}↩ Resume: python agent.py --resume {session_file}{_RST}')
     # Auto-extract learnings — runs silently after every session
     try:
         from extract_learnings import learn_from_session
