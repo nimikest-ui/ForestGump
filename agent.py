@@ -1314,6 +1314,14 @@ Then I will reply with the real output, and you decide the next step."""
 def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_message_history=10):
     from ui_modal import init_ui
     ui = init_ui()
+
+    # Prompt for task if empty (after TUI initialized, so it appears cleanly)
+    if not task and not resume_data:
+        task = input('Enter task: ').strip()
+        if not task:
+            print('No task provided.')
+            return
+
     shell = Shell()
     mem = load_memory()
     techniques = load_techniques()
