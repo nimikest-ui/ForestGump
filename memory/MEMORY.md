@@ -1,0 +1,1 @@
+- [SSH failure detection improvements](ssh_failure_detection.md) — Fixed sshpass being blamed for remote command errors

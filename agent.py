@@ -270,12 +270,20 @@ class AnthropicProvider:
         r = self.client.messages.create(
             model=self.model,
             max_tokens=4096,
-            system=system,
+            system=[
+                {
+                    'type': 'text',
+                    'text': system,
+                    'cache_control': {'type': 'ephemeral'},
+                }
+            ],
             messages=messages,
         )
         usage = {
             'input_tokens': r.usage.input_tokens,
             'output_tokens': r.usage.output_tokens,
+            'cache_creation_input_tokens': getattr(r.usage, 'cache_creation_input_tokens', 0),
+            'cache_read_input_tokens': getattr(r.usage, 'cache_read_input_tokens', 0),
         }
         return r.content[0].text, usage
 
@@ -553,7 +561,7 @@ def extract_memory_updates(response, output, cmd, mem):
 
 
 def command_base(cmd):
-    """Extract command base name without wrappers like sudo/timeout."""
+    """Extract command base name without wrappers like sudo/timeout/sshpass."""
     parts = cmd.strip().split()
     i = 0
     if i < len(parts) and parts[i] in ('sudo', 'su'):
@@ -562,7 +570,95 @@ def command_base(cmd):
         i += 2
     if i < len(parts) and parts[i] == 'sudo':
         i += 1
+    # For sshpass + ssh, return 'ssh' as the base, not 'sshpass' (failure belongs to remote, not the tool)
+    if i < len(parts) and parts[i] == 'sshpass':
+        i += 1
+        # Skip -p password argument if present
+        if i < len(parts) and parts[i] == '-p' and i + 1 < len(parts):
+            i += 2
     return parts[i] if i < len(parts) else ''
+
+
+def is_ssh_connection_failure(output):
+    """Detect if an SSH command failed at the connection/authentication stage.
+
+    Returns True if output shows SSH-level errors (auth failed, host unreachable, etc).
+    If SSH succeeded but remote command failed, returns False.
+    """
+    out = (output or '').lower()
+    if not out:
+        return False
+
+    # These errors indicate SSH connection/auth failed (not remote command errors)
+    ssh_auth_errors = [
+        'permission denied (publickey',  # SSH auth failure
+        'permission denied (password',   # SSH auth failure
+        'could not resolve hostname',
+        'connection refused',
+        'connection timed out',
+        'connection reset',
+        'ssh: command not found',  # ssh binary not found locally
+        'host key verification failed',
+        'remote host identification has changed',
+        'no route to host',
+        'operation timed out',
+        'ssh_exchange_identification',
+        'network is unreachable',
+        'no address associated',
+    ]
+
+    lines = out.splitlines()
+    # Check first 5 lines for SSH-specific errors (before any remote output)
+    for line in lines[:5]:
+        for err in ssh_auth_errors:
+            if err in line:
+                return True
+
+    return False
+
+
+def has_remote_output(output):
+    """Detect if output contains evidence of remote command execution.
+
+    Remote output indicators: shell prompts, command output, remote error messages.
+    This shows SSH connection succeeded, even if the remote command failed.
+    """
+    out = (output or '').lower()
+    if not out:
+        return False
+
+    # Remote system indicators that show SSH succeeded
+    remote_indicators = [
+        'permission denied',  # remote: command ran but permission issue
+        'no such file',       # remote: file not found
+        'not found',          # remote: command/file not found
+        'command not found',  # remote: command doesn't exist on remote
+        'not a directory',    # remote: path issue
+        'is a directory',     # remote: tried to treat dir as file
+        'read-only',          # remote: filesystem issue
+        'cannot execute',     # remote: permission/format issue
+        'invalid argument',   # remote: bad argument to remote command
+        'bad option',         # remote: unrecognized flag
+        'mkdir: cannot create',  # remote mkdir output
+        'unable to ',         # remote: various failures
+        'denied: ',           # remote: access denial
+    ]
+
+    # Look for output that clearly came from remote execution
+    lines = out.splitlines()
+    for i, line in enumerate(lines):
+        # Skip the first line if it's clearly ssh banner/connection message
+        if i == 0 and any(x in line for x in ['ssh_exchange', 'ssh: command not found']):
+            continue
+        if any(ind in line for ind in remote_indicators):
+            return True
+
+    # If there's substantial output, it likely came from remote
+    output_lines = [l for l in lines if l.strip() and not l.startswith('echo')]
+    if len(output_lines) > 2:
+        return True
+
+    return False
 
 
 def is_output_success(output):
@@ -600,12 +696,26 @@ def is_output_success(output):
 def is_command_failure(output, cmd_base=''):
     """Detect whether a command truly failed.
 
+    For SSH commands: distinguish connection failure from remote command failure.
+    - SSH connection failed: tool failure (should be retried or abandoned)
+    - Remote command failed: not the tool's fault (try different approach/syntax)
+
     Filters heredoc echo lines (bash '> ' prefix) before evaluation so that
     expect scripts written as heredocs don't produce false progress signals.
     """
     out = (output or '').lower()
     if not out:
         return True
+
+    # For SSH/sshpass commands: if connection failed, it's a true failure.
+    # If connection succeeded but remote command failed, that's not an SSH failure.
+    if cmd_base in ('ssh', 'sshpass'):
+        if is_ssh_connection_failure(output):
+            return True  # SSH connection/auth failed — true tool failure
+        if has_remote_output(output):
+            return False  # SSH succeeded, remote command output present — not an SSH failure
+        # No connection error and no remote output: likely connection established but remote cmd errored
+        return False
 
     # Filter heredoc echo lines — bash prints '> ' before each heredoc input line.
     # These lines contain the script text (e.g. '> expect "password:"') but are
@@ -668,8 +778,11 @@ def is_command_failure(output, cmd_base=''):
     return any(marker in eval_out for marker in fail_markers)
 
 
-def build_round_review(turn, log, mem, task):
-    """Build a ranked success/failure review and retrieval hints for next moves."""
+def build_round_review(turn, log, mem, task, include_memory=False):
+    """Build a ranked success/failure review and retrieval hints for next moves.
+
+    Set include_memory=False (default) to save tokens. Memory is already in first message.
+    """
     exec_events = [e for e in log if e.get('type') == 'exec']
     blocked_events = [e for e in log if e.get('type') in ('blocked', 'loop_break')]
 
@@ -707,28 +820,29 @@ def build_round_review(turn, log, mem, task):
     focus_terms = [task]
     focus_terms.extend(cmd for cmd, _ in top_fail)
     focus_query = ' '.join(t for t in focus_terms if t).strip()
-    dynamic_skills = skills_context(focus_query, limit=5)
-    mem_ctx = memory_context(mem)
+    # Only query skills if there are top failures (avoid redundant queries)
+    dynamic_skills = skills_context(focus_query, limit=3) if top_fail else ''
 
     lines = [
         f'ROUND REVIEW @ turn {turn}',
-        f'- Successes in recent window: {total_success}',
-        f'- Failures in recent window: {total_fail}',
+        f'- Successes: {total_success}, Failures: {total_fail}',
     ]
     if top_success:
-        lines.append('- Ranked successes: ' + ', '.join(f'{cmd} ({count})' for cmd, count in top_success))
+        lines.append('- Working: ' + ', '.join(f'{cmd}({c})' for cmd, c in top_success))
     if top_fail:
-        lines.append('- Ranked failures: ' + ', '.join(f'{cmd} ({count})' for cmd, count in top_fail))
+        lines.append('- Failing: ' + ', '.join(f'{cmd}({c})' for cmd, c in top_fail))
 
-    if mem_ctx:
-        lines.append('\nUse this memory to choose your next approach (prefer known-good methods):')
-        lines.append(mem_ctx)
+    if include_memory:
+        mem_ctx = memory_context(mem)
+        if mem_ctx:
+            lines.append('\nMemory (from prior sessions):')
+            lines.append(mem_ctx)
 
     if dynamic_skills:
-        lines.append('\nUse these retrieved skills that match current failures/task:')
+        lines.append('\nRelevant skills for current failures:')
         lines.append(dynamic_skills)
 
-    lines.append('\nNow pick ONE command that addresses the top-ranked failure using memory/skills evidence.')
+    lines.append('\nPick ONE command addressing top-ranked failure.')
     return '\n'.join(lines)
 
 
@@ -774,6 +888,45 @@ def summarize_resume_session(resume_data, task, mem=None):
 def build_resume_message(resume_data, task, mem=None):
     """Create the user message that resumes a previous session."""
     return summarize_resume_session(resume_data, task, mem)
+
+
+def trim_message_history(messages, max_history=10):
+    """Keep only recent N turns to reduce token usage.
+
+    Preserves first user message (task context) + last N interaction pairs.
+    """
+    if len(messages) <= max_history:
+        return messages
+
+    # Always keep first message (task context)
+    kept = [messages[0]]
+    # Add last N-1 messages (to stay under max_history)
+    kept.extend(messages[-(max_history - 1):])
+    return kept
+
+
+def compress_command_output(output, max_length=1500):
+    """Compress long command outputs for message context.
+
+    Keeps first 800 chars + last 700 chars for long outputs.
+    """
+    if len(output) <= max_length:
+        return output
+
+    lines = output.split('\n')
+    if len(lines) > 60:
+        # Many lines: show first 30, skip middle, show last 20
+        first_lines = '\n'.join(lines[:30])
+        last_lines = '\n'.join(lines[-20:])
+        skipped = len(lines) - 50
+        return f'{first_lines}\n... [{skipped} lines truncated] ...\n{last_lines}'
+    else:
+        # Few lines but long: show start + end
+        first = output[:800]
+        last = output[-700:]
+        if first != last:  # avoid duplication if output is small
+            return f'{first}\n... [output truncated] ...\n{last}'
+        return output
 
 
 # ─── Session Persistence ─────────────────────────────────────
@@ -872,7 +1025,7 @@ You: Let me check the network interfaces.
 Then I will reply with the real output, and you decide the next step."""
 
 
-def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
+def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_message_history=10):
     shell = Shell()
     mem = load_memory()
     techniques = load_techniques()
@@ -882,6 +1035,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
     migrate_techniques_json(SCRIPT_DIR / 'techniques.json')
 
     # Build system prompt with skills from experience (search by task keywords)
+    # Only retrieve skills once at the start, not every turn (caching optimization)
     skill_str = skills_context(task, limit=5)
     full_system = SYSTEM + ('\n\n' + skill_str if skill_str else '')
 
@@ -935,8 +1089,13 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
         messages.append({'role': 'user', 'content': first_msg})
 
     try:
-        # Initialize token tracking
-        token_totals = {'input_tokens': 0, 'output_tokens': 0}
+        # Initialize token tracking (includes cache metrics if using Anthropic)
+        token_totals = {
+            'input_tokens': 0,
+            'output_tokens': 0,
+            'cache_creation_input_tokens': 0,
+            'cache_read_input_tokens': 0,
+        }
 
         for turn in range(1, max_turns + 1):
             turn_count = turn
@@ -964,20 +1123,33 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
             # ── LLM thinks ──
             t_llm_start = time.time()
             try:
-                response, usage = provider.chat(messages, full_system)
+                # Trim message history before sending to reduce token usage
+                # Keep full history in memory for logging; send only recent context to LLM
+                trimmed_msgs = trim_message_history(messages, max_history=max_message_history)
+                response, usage = provider.chat(trimmed_msgs, full_system)
             except Exception as e:
                 print(f'\n❌ Provider error: {e}')
                 break
             t_thought = time.time()
             llm_inference = round(t_thought - t_llm_start, 1)
 
-            # Accumulate token counts
+            # Accumulate token counts (including cache metrics)
             if usage:
                 token_totals['input_tokens'] += usage.get('input_tokens', 0)
                 token_totals['output_tokens'] += usage.get('output_tokens', 0)
+                token_totals['cache_creation_input_tokens'] += usage.get('cache_creation_input_tokens', 0)
+                token_totals['cache_read_input_tokens'] += usage.get('cache_read_input_tokens', 0)
 
-            # Display agent response with token info
-            tok_str = f" | {usage['input_tokens']}in/{usage['output_tokens']}out tok" if usage else ''
+            # Display agent response with token info (including cache hits if available)
+            if usage:
+                tok_parts = [f"{usage.get('input_tokens', 0)}in", f"{usage.get('output_tokens', 0)}out"]
+                if usage.get('cache_creation_input_tokens', 0):
+                    tok_parts.append(f"{usage['cache_creation_input_tokens']}cache_create")
+                if usage.get('cache_read_input_tokens', 0):
+                    tok_parts.append(f"{usage['cache_read_input_tokens']}cache_hit")
+                tok_str = f" | {'/'.join(tok_parts)} tok"
+            else:
+                tok_str = ''
             print(f'\n🤖 Agent: [llm={llm_inference}s{tok_str}]\n{response}')
             messages.append({'role': 'assistant', 'content': response})
             log.append({'turn': turn, 'type': 'thought', 'content': response, 'tokens': usage, 'ts': t_thought, 'llm_s': llm_inference})
@@ -1286,12 +1458,13 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                     shell = Shell()
                     output = f'[command returned no output after {cmd_timeout}s — the shell has been reset.]'
 
-            # Truncate massive output for display and context
+            # Truncate for display, compress for context (token optimization)
             display = output[:5000] + ('\n... [truncated]' if len(output) > 5000 else '')
-            context = output[:12000] + ('\n... [truncated]' if len(output) > 12000 else '')
+            context = compress_command_output(output, max_length=1500)
 
             print(f'\n📟 Output: [exec={elapsed}s]\n{display}')
             messages.append({'role': 'user', 'content': f'Terminal output:\n```\n{context}\n```'})
+            # Keep full output in log for debugging; only compressed version in messages
             log.append({'turn': turn, 'type': 'exec', 'cmd': cmd, 'output': output[:12000], 'ts': t_exec_start, 'exec_s': elapsed})
 
             # ── Auto-extract memory from output ──
@@ -1308,6 +1481,19 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
     # ── Extract skills from successful session ──
     outcome = 'success' if turn_count > 0 else 'abandoned'
     extract_skills_from_session(messages, mem, session_id, provider, outcome=outcome)
+
+    # ── Print token usage summary ──
+    if token_totals['input_tokens'] > 0 or token_totals['output_tokens'] > 0:
+        print(f'\n📊 Token Usage Summary:')
+        print(f'   Input:  {token_totals["input_tokens"]:,} tokens')
+        print(f'   Output: {token_totals["output_tokens"]:,} tokens')
+        total_billed = token_totals['input_tokens'] + token_totals['output_tokens']
+        if token_totals.get('cache_creation_input_tokens', 0):
+            print(f'   Cache created: {token_totals["cache_creation_input_tokens"]:,} tokens')
+        if token_totals.get('cache_read_input_tokens', 0):
+            saved = token_totals['cache_read_input_tokens'] * 0.9  # 90% discount on cached reads
+            print(f'   Cache hits: {token_totals["cache_read_input_tokens"]:,} tokens (saved ~{int(saved):,} tokens @ 90% discount)')
+        print(f'   Total billed: {total_billed:,} tokens ({turn_count} turns)')
 
     # ── Save session (for resume) ──
     session_file = save_session(task, provider.name, turn_count, messages, log, mem, token_totals, session_id)
