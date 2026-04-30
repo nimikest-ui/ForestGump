@@ -1937,11 +1937,9 @@ def main():
         resume_data = load_session(args.resume)
         task = args.task or resume_data.get('task', '')
     else:
-        task = args.task or input('Enter task: ')
-        if not task.strip():
-            print('No task provided.')
-            sys.exit(1)
+        task = args.task or ''
 
+    os.system('clear' if os.name != 'nt' else 'cls')
     run_agent(provider, task, max_turns=args.max_turns, confirm=not args.no_confirm, resume_data=resume_data)
 
 
