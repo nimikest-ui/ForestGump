@@ -1552,7 +1552,7 @@ def main():
 
     # Build provider
     if args.provider == 'claude':
-        provider = ClaudeCliProvider(args.model or 'sonnet')
+        provider = ClaudeCliProvider(args.model or 'haiku')
     elif args.provider == 'anthropic':
         if not os.environ.get('ANTHROPIC_API_KEY'):
             print('❌ Set ANTHROPIC_API_KEY environment variable.')
