@@ -339,10 +339,9 @@ class ClaudeCliProvider:
         cmd = [
             'claude', '-p',
             '--model', self.model,
-            '--output-format', 'text',
+            '--output-format', 'json',
             '--system-prompt', system,
             '--tools', '',
-            '--verbose',
         ]
 
         result = subprocess.run(
@@ -356,7 +355,19 @@ class ClaudeCliProvider:
         if result.returncode != 0:
             raise RuntimeError(f'Claude CLI error: {result.stderr.strip()}')
 
-        return result.stdout.strip(), None  # Claude CLI provides no token usage
+        try:
+            data = json.loads(result.stdout.strip())
+            response_text = data.get('result', '')
+            usage_data = data.get('usage', {})
+            usage = {
+                'input_tokens': usage_data.get('input_tokens', 0),
+                'output_tokens': usage_data.get('output_tokens', 0),
+                'cache_creation_input_tokens': usage_data.get('cache_creation_input_tokens', 0),
+                'cache_read_input_tokens': usage_data.get('cache_read_input_tokens', 0),
+            }
+            return response_text, usage
+        except json.JSONDecodeError:
+            raise RuntimeError(f'Claude CLI returned invalid JSON: {result.stdout[:500]}')
 
 
 class CopilotProvider:
