@@ -940,6 +940,71 @@ def compress_command_output(output, max_length=1500):
         return output
 
 
+def get_model_pricing(provider_name):
+    """Extract model and return correct pricing."""
+    PRICING = {
+        'opus': {'input': 15.0, 'output': 75.0},
+        'sonnet': {'input': 3.0, 'output': 15.0},
+        'haiku': {'input': 0.25, 'output': 1.25},
+    }
+
+    provider_lower = provider_name.lower()
+
+    # Check for model in provider name (e.g., 'anthropic/haiku', 'claude-cli/sonnet')
+    for model, pricing in PRICING.items():
+        if model in provider_lower:
+            return pricing
+
+    # Default to haiku if no model detected
+    return PRICING['haiku']
+
+
+def print_token_dashboard(token_totals, turn, provider_name, log):
+    """Display running token usage dashboard with costs and efficiency metrics."""
+    inp = token_totals.get('input_tokens', 0)
+    out = token_totals.get('output_tokens', 0)
+    cache_create = token_totals.get('cache_creation_input_tokens', 0)
+    cache_hit = token_totals.get('cache_read_input_tokens', 0)
+
+    total_billed = inp + out
+    cache_saved = int(cache_hit * 0.9) if cache_hit else 0
+
+    # Get pricing for this provider/model
+    pricing = get_model_pricing(provider_name)
+    cost = (inp * pricing['input'] + out * pricing['output']) / 1_000_000
+
+    # Count successful commands for efficiency
+    successful_commands = sum(1 for entry in (log or []) if entry.get('type') == 'exec' and 'output' in entry)
+    cost_per_cmd = cost / max(successful_commands, 1) if successful_commands > 0 else 0
+
+    # Build dashboard
+    dashboard = f'\n📊 Token Dashboard (Turn {turn}):'
+    dashboard += f'\n   Cumulative:'
+    dashboard += f'\n      Input:  {inp:>8,} tk'
+    dashboard += f'\n      Output: {out:>8,} tk'
+    dashboard += f'\n      Total:  {total_billed:>8,} tk'
+
+    if cache_create or cache_hit:
+        dashboard += f'\n   Cache:'
+        if cache_create:
+            dashboard += f'\n      Created: {cache_create:>6,} tk'
+        if cache_hit:
+            dashboard += f'\n      Hits:    {cache_hit:>6,} tk (~{cache_saved:,} saved @ 90%)'
+
+    # Show cost (works for anthropic and claude-cli providers)
+    if 'anthropic' in provider_name.lower() or 'claude' in provider_name.lower():
+        dashboard += f'\n   Cost:'
+        dashboard += f'\n      Total:     ${cost:.4f}'
+        if successful_commands > 0:
+            dashboard += f'\n      Per cmd:   ${cost_per_cmd:.4f} ({successful_commands} cmds)'
+        dashboard += f'\n   Efficiency:'
+        dashboard += f'\n      Tokens/turn: {total_billed / max(turn, 1):.0f}'
+        if successful_commands > 0:
+            dashboard += f'\n      Tokens/cmd:  {total_billed / successful_commands:.0f}'
+
+    print(dashboard)
+
+
 # ─── Session Persistence ─────────────────────────────────────
 
 def save_session(task, provider_name, turn_count, messages, log, mem, token_totals=None, session_id=None):
@@ -1162,6 +1227,11 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
             else:
                 tok_str = ''
             print(f'\n🤖 Agent: [llm={llm_inference}s{tok_str}]\n{response}')
+
+            # Display running token dashboard
+            if usage:
+                print_token_dashboard(token_totals, turn, provider.name, log)
+
             messages.append({'role': 'assistant', 'content': response})
             log.append({'turn': turn, 'type': 'thought', 'content': response, 'tokens': usage, 'ts': t_thought, 'llm_s': llm_inference})
 
@@ -1495,7 +1565,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
 
     # ── Print token usage summary ──
     if token_totals['input_tokens'] > 0 or token_totals['output_tokens'] > 0:
-        print(f'\n📊 Token Usage Summary:')
+        print(f'\n📊 Token Usage Summary ({turn_count} turns):')
         print(f'   Input:  {token_totals["input_tokens"]:,} tokens')
         print(f'   Output: {token_totals["output_tokens"]:,} tokens')
         total_billed = token_totals['input_tokens'] + token_totals['output_tokens']
@@ -1504,7 +1574,30 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
         if token_totals.get('cache_read_input_tokens', 0):
             saved = token_totals['cache_read_input_tokens'] * 0.9  # 90% discount on cached reads
             print(f'   Cache hits: {token_totals["cache_read_input_tokens"]:,} tokens (saved ~{int(saved):,} tokens @ 90% discount)')
-        print(f'   Total billed: {total_billed:,} tokens ({turn_count} turns)')
+        print(f'   Total billed: {total_billed:,} tokens')
+
+        # Cost breakdown for Anthropic and Claude CLI
+        if 'anthropic' in provider.name.lower() or 'claude' in provider.name.lower():
+            pricing = get_model_pricing(provider.name)
+            inp_cost = token_totals['input_tokens'] * pricing['input'] / 1_000_000
+            out_cost = token_totals['output_tokens'] * pricing['output'] / 1_000_000
+            total_cost = inp_cost + out_cost
+            cache_savings = 0
+            if token_totals.get('cache_read_input_tokens', 0):
+                cache_savings = token_totals['cache_read_input_tokens'] * (pricing['input'] * 0.1) / 1_000_000
+
+            print(f'\n   Cost Breakdown:')
+            print(f'      Input cost:   ${inp_cost:.6f}')
+            print(f'      Output cost:  ${out_cost:.6f}')
+            if cache_savings > 0:
+                print(f'      Cache saved:  -${cache_savings:.6f}')
+            print(f'      Total cost:   ${total_cost:.6f}')
+            print(f'      Per turn:     ${total_cost / max(turn_count, 1):.6f}')
+
+            # Count successful commands
+            successful_cmds = sum(1 for entry in log if entry.get('type') == 'exec' and 'output' in entry)
+            if successful_cmds > 0:
+                print(f'      Per command:  ${total_cost / successful_cmds:.6f} ({successful_cmds} commands)')
 
     # ── Save session (for resume) ──
     session_file = save_session(task, provider.name, turn_count, messages, log, mem, token_totals, session_id)
