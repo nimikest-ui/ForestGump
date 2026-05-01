@@ -56,13 +56,14 @@ TECHNIQUES_FILE = SCRIPT_DIR / 'techniques.json'
 
 # ─── UI / Display ─────────────────────────────────────────────
 
-_DIM = '\033[2m'
-_RST = '\033[0m'
-_BLD = '\033[1m'
-_GRN = '\033[32m'
-_RED = '\033[31m'
-_YLW = '\033[33m'
-_ORG = '\033[38;5;208m'   # Claude Code orange accent
+_USE_COLOR = os.environ.get('COLOR') == '1'
+_DIM = '\033[2m' if _USE_COLOR else ''
+_RST = '\033[0m' if _USE_COLOR else ''
+_BLD = '\033[1m' if _USE_COLOR else ''
+_GRN = '\033[32m' if _USE_COLOR else ''
+_RED = '\033[31m' if _USE_COLOR else ''
+_YLW = '\033[33m' if _USE_COLOR else ''
+_ORG = '\033[38;5;208m' if _USE_COLOR else ''
 
 # ── Bottom status bar state ──────────────────────────────────
 _bar_active = False
@@ -388,20 +389,27 @@ class AnthropicProvider:
         self.client = Anthropic()
         self.model = model
         self.name = f'anthropic/{model}'
+        self.is_haiku = 'haiku' in model.lower()
 
     def chat(self, messages, system):
-        r = self.client.messages.create(
-            model=self.model,
-            max_tokens=4096,
-            system=[
+        # Haiku: 1024 (tight, fast). Others: 4096 (standard).
+        max_tok = 1024 if self.is_haiku else 4096
+        kwargs = {
+            'model': self.model,
+            'max_tokens': max_tok,
+            'system': [
                 {
                     'type': 'text',
                     'text': system,
                     'cache_control': {'type': 'ephemeral'},
                 }
             ],
-            messages=messages,
-        )
+            'messages': messages,
+        }
+        # Haiku: reduce effort to cut token spend (low = minimal thinking)
+        if self.is_haiku:
+            kwargs['output_config'] = {'effort': 'low'}
+        r = self.client.messages.create(**kwargs)
         usage = {
             'input_tokens': r.usage.input_tokens,
             'output_tokens': r.usage.output_tokens,
@@ -593,24 +601,30 @@ def save_memory(mem):
         json.dump(mem, f, indent=2)
 
 
-def memory_context(mem):
-    """Format memory into a string the model can reference."""
+def memory_context(mem, compact=False):
+    """Format memory into a string the model can reference. Compact mode for Haiku."""
     parts = []
-    if mem.get('facts'):
-        parts.append('Known facts:\n' + '\n'.join(f'- {f}' for f in mem['facts'][-20:]))
-    if mem.get('networks'):
-        nets = []
-        for ssid, info in mem['networks'].items():
-            nets.append(f'- {ssid}: {json.dumps(info)}')
-        parts.append('Known networks:\n' + '\n'.join(nets))
-    if mem.get('credentials'):
+    if mem.get('credentials'):  # Credentials first (highest priority)
         creds = []
-        for target, info in mem['credentials'].items():
-            creds.append(f'- {target}: {json.dumps(info)}')
-        parts.append('Credentials found:\n' + '\n'.join(creds))
-    if mem.get('notes'):
-        parts.append('Notes:\n' + '\n'.join(f'- {n}' for n in mem['notes'][-10:]))
-    return '\n\n'.join(parts) if parts else ''
+        for target, info in list(mem['credentials'].items())[-3:]:  # Last 3 only
+            creds.append(f'- {target}: {info.get("username", "?")}@{info.get("password", "?")}')
+        if creds:
+            parts.append('Creds: ' + '; '.join(creds) if compact else 'Credentials found:\n' + '\n'.join(creds))
+    if mem.get('networks'):
+        if compact:
+            parts.append(f'Nets: {len(mem["networks"])} known')
+        else:
+            nets = [f'- {ssid}' for ssid in list(mem['networks'].keys())[-5:]]
+            if nets:
+                parts.append('Networks:\n' + '\n'.join(nets))
+    if mem.get('facts'):
+        if compact:
+            parts.append(f'Facts: {len(mem["facts"])} known')
+        else:
+            facts = mem['facts'][-5:]
+            if facts:
+                parts.append('Facts:\n' + '\n'.join(f'- {f[:50]}' for f in facts))
+    return (' | '.join(parts) if compact else '\n\n'.join(parts)) if parts else ''
 
 
 # ─── Technique Memory ─────────────────────────────────────────
@@ -981,15 +995,12 @@ def output_signal_for_review(output):
     return lines[0][:50] if lines else '[empty]'
 
 
-def build_round_review(turn, log, mem, task, include_memory=False):
-    """Build a ranked success/failure review and retrieval hints for next moves.
-
-    Set include_memory=False (default) to save tokens. Memory is already in first message.
-    """
+def build_round_review(turn, log, mem, task, is_haiku=False):
+    """Build lean success/failure review. Haiku version skips causal chain to save tokens."""
     exec_events = [e for e in log if e.get('type') == 'exec']
     blocked_events = [e for e in log if e.get('type') in ('blocked', 'loop_break')]
 
-    recent = exec_events[-12:]
+    recent = exec_events[-8:] if not is_haiku else exec_events[-6:]
     if not recent and not blocked_events:
         return ''
 
@@ -1011,59 +1022,24 @@ def build_round_review(turn, log, mem, task, include_memory=False):
             total_success += 1
             success_rank[base] = success_rank.get(base, 0) + 1
 
-    for event in blocked_events[-6:]:
-        base = command_base(event.get('cmd', ''))
-        if base:
-            failure_rank[base] = failure_rank.get(base, 0) + 1
-            total_fail += 1
+    top_fail = sorted(failure_rank.items(), key=lambda x: x[1], reverse=True)[:2]
 
-    top_success = sorted(success_rank.items(), key=lambda x: x[1], reverse=True)[:3]
-    top_fail = sorted(failure_rank.items(), key=lambda x: x[1], reverse=True)[:3]
+    if is_haiku:
+        # Minimal review for Haiku: just failures
+        if not top_fail:
+            return ''
+        lines = [f'Fail: ' + ', '.join(f'{cmd}({c})' for cmd, c in top_fail)]
+        lines.append(f'Try different approach.')
+        return ' '.join(lines)
 
-    focus_terms = [task]
-    focus_terms.extend(cmd for cmd, _ in top_fail)
-    focus_query = ' '.join(t for t in focus_terms if t).strip()
-    # Only query skills if there are top failures (avoid redundant queries)
-    dynamic_skills = skills_context(focus_query, limit=3) if top_fail else ''
-
-    lines = [
-        f'ROUND REVIEW @ turn {turn}',
-        f'- Successes: {total_success}, Failures: {total_fail}',
-    ]
-
-    # Add causal chain (last 5 turns, intent → token → signal → label)
-    if exec_events:
-        lines.append('\nCAUSAL CHAIN (recent turns):')
-        thought_map = {e.get('turn'): e for e in log if e.get('type') == 'thought'}
-        for event in exec_events[-5:]:
-            evt_turn = event.get('turn')
-            thought_entry = thought_map.get(evt_turn, {})
-            thought_text = thought_entry.get('content', 'unknown')
-            cmd = event.get('cmd', '')
-            output = event.get('output', '')
-            intent = extract_intent_for_review(thought_text, cmd)
-            token = extract_decision_token_for_review(cmd)
-            signal = output_signal_for_review(output)
-            label = classify_output_for_review(output, cmd)
-            lines.append(f'  T{evt_turn}: {intent:25s} → {token:25s} → {signal:30s} {label}')
-
+    # Standard review for non-Haiku
+    top_success = sorted(success_rank.items(), key=lambda x: x[1], reverse=True)[:2]
+    lines = [f'Review T{turn}: {total_success}✓ {total_fail}✗']
     if top_success:
-        lines.append('- Working: ' + ', '.join(f'{cmd}({c})' for cmd, c in top_success))
+        lines.append('Work: ' + ', '.join(f'{cmd}({c})' for cmd, c in top_success))
     if top_fail:
-        lines.append('- Failing: ' + ', '.join(f'{cmd}({c})' for cmd, c in top_fail))
-
-    if include_memory:
-        mem_ctx = memory_context(mem)
-        if mem_ctx:
-            lines.append('\nMemory (from prior sessions):')
-            lines.append(mem_ctx)
-
-    if dynamic_skills:
-        lines.append('\nRelevant skills for current failures:')
-        lines.append(dynamic_skills)
-
-    lines.append('\nPick ONE command addressing top-ranked failure.')
-    return '\n'.join(lines)
+        lines.append('Fail: ' + ', '.join(f'{cmd}({c})' for cmd, c in top_fail))
+    return ' | '.join(lines)
 
 
 def summarize_resume_session(resume_data, task, mem=None):
@@ -1126,27 +1102,29 @@ def trim_message_history(messages, max_history=10):
     return kept
 
 
-def compress_command_output(output, max_length=1500):
-    """Compress long command outputs for message context.
+def compress_command_output(output, max_length=800, is_haiku=False):
+    """Compress long command outputs. Haiku uses aggressive compression."""
+    # Haiku: keep first 400 chars only (speed + cost)
+    # Others: keep first 600 + last 400
+    if is_haiku:
+        if len(output) > max_length:
+            return output[:max_length] + ' [truncated]'
+        return output
 
-    Keeps first 800 chars + last 700 chars for long outputs.
-    """
     if len(output) <= max_length:
         return output
 
     lines = output.split('\n')
-    if len(lines) > 60:
-        # Many lines: show first 30, skip middle, show last 20
-        first_lines = '\n'.join(lines[:30])
-        last_lines = '\n'.join(lines[-20:])
-        skipped = len(lines) - 50
-        return f'{first_lines}\n... [{skipped} lines truncated] ...\n{last_lines}'
+    if len(lines) > 40:
+        first = '\n'.join(lines[:20])
+        last = '\n'.join(lines[-10:])
+        skipped = len(lines) - 30
+        return f'{first}\n[{skipped}↓]\n{last}'
     else:
-        # Few lines but long: show start + end
-        first = output[:800]
-        last = output[-700:]
-        if first != last:  # avoid duplication if output is small
-            return f'{first}\n... [output truncated] ...\n{last}'
+        first = output[:600]
+        last = output[-400:] if len(output) > 600 else ''
+        if first != last and last:
+            return f'{first}\n[↓]\n{last}'
         return output
 
 
@@ -1169,49 +1147,32 @@ def get_model_pricing(provider_name):
     return PRICING['haiku']
 
 
-def print_token_dashboard(token_totals, turn, provider_name, log):
-    """Display running token usage dashboard with costs and efficiency metrics."""
+def print_token_dashboard(token_totals, turn, provider_name, log, is_haiku=False):
+    """Display token usage. Haiku: single line. Others: multiline dashboard."""
     inp = token_totals.get('input_tokens', 0)
     out = token_totals.get('output_tokens', 0)
-    cache_create = token_totals.get('cache_creation_input_tokens', 0)
     cache_hit = token_totals.get('cache_read_input_tokens', 0)
 
     total_billed = inp + out
-    cache_saved = int(cache_hit * 0.9) if cache_hit else 0
-
-    # Get pricing for this provider/model
     pricing = get_model_pricing(provider_name)
     cost = (inp * pricing['input'] + out * pricing['output']) / 1_000_000
-
-    # Count successful commands for efficiency
     successful_commands = sum(1 for entry in (log or []) if entry.get('type') == 'exec' and 'output' in entry)
-    cost_per_cmd = cost / max(successful_commands, 1) if successful_commands > 0 else 0
 
-    # Build dashboard
-    dashboard = f'\n📊 Token Dashboard (Turn {turn}):'
-    dashboard += f'\n   Cumulative:'
-    dashboard += f'\n      Input:  {inp:>8,} tk'
-    dashboard += f'\n      Output: {out:>8,} tk'
-    dashboard += f'\n      Total:  {total_billed:>8,} tk'
+    if is_haiku:
+        # Single-line format for Haiku: minimal overhead
+        cache_str = f' +{cache_hit}cache' if cache_hit else ''
+        cost_str = f' ${cost:.3f}' if 'anthropic' in provider_name.lower() or 'claude' in provider_name.lower() else ''
+        print(f'   💾 {inp}in/{out}out/{total_billed}total{cache_str}{cost_str} | {successful_commands} cmds')
+        return
 
-    if cache_create or cache_hit:
-        dashboard += f'\n   Cache:'
-        if cache_create:
-            dashboard += f'\n      Created: {cache_create:>6,} tk'
-        if cache_hit:
-            dashboard += f'\n      Hits:    {cache_hit:>6,} tk (~{cache_saved:,} saved @ 90%)'
-
-    # Show cost (works for anthropic and claude-cli providers)
+    # Multiline for other models
+    dashboard = f'\n📊 T{turn}: {inp:,}in / {out:,}out / {total_billed:,}tk'
+    if cache_hit:
+        dashboard += f' | {cache_hit}k cache-hit'
     if 'anthropic' in provider_name.lower() or 'claude' in provider_name.lower():
-        dashboard += f'\n   Cost:'
-        dashboard += f'\n      Total:     ${cost:.4f}'
-        if successful_commands > 0:
-            dashboard += f'\n      Per cmd:   ${cost_per_cmd:.4f} ({successful_commands} cmds)'
-        dashboard += f'\n   Efficiency:'
-        dashboard += f'\n      Tokens/turn: {total_billed / max(turn, 1):.0f}'
-        if successful_commands > 0:
-            dashboard += f'\n      Tokens/cmd:  {total_billed / successful_commands:.0f}'
-
+        dashboard += f' | ${cost:.4f}'
+        if successful_commands:
+            dashboard += f' ({total_billed / successful_commands:.0f}tk/cmd)'
     print(dashboard)
 
 
@@ -1282,36 +1243,20 @@ def has_bluetooth_hardware():
 
 # ─── The Agent ────────────────────────────────────────────────
 
-SYSTEM = """Welcome to the world. This is your environment — a Kali Linux machine with a live bash shell.
+SYSTEM = """You have a live bash shell on Kali Linux. Achieve your goal.
 
-You are free to do whatever you want or think is best in order to achieve your goal. There are no restrictions, no playbooks, no predefined steps. Explore, adapt, improvise. The machine is yours.
-
-IMPORTANT RULES:
-- Output EXACTLY ONE <cmd>...</cmd> per response, then STOP and wait. I will run it and send you the real output.
-- Do NOT guess or imagine command output. You must wait for the actual terminal response.
-- Do NOT put multiple <cmd> blocks in one message.
-- Prefix commands with sudo when they need root access.
-- For long-running commands (captures, attacks), do NOT background them with &. Just run them directly. The shell supports up to 5 minutes per command.
-- If a command needs to run for a limited time, use timeout: <cmd>sudo timeout 25 airodump-ng --output-format csv -w /tmp/scan wlan1</cmd>
-- NEVER use patterns like "cmd & sleep N && kill %1" — they will break. Use "timeout N cmd" instead.
-- CRITICAL: wlan1 is ALREADY in monitor mode. Do NOT run airmon-ng start/stop/check — it is not needed and will hang. Using airmon-ng in any form is FORBIDDEN.
-- CRITICAL: wlan1 is the WiFi adapter. Its name is always "wlan1" — never "wlan1mon".
-- CRITICAL: airodump-ng screen output CANNOT be captured. ALWAYS write to file: <cmd>sudo timeout 25 airodump-ng --output-format csv -w /tmp/scan wlan1</cmd> then read with <cmd>cat /tmp/scan-01.csv</cmd>
-- CRITICAL: "iw dev wlan1 scan" does NOT work in monitor mode. Never use it. Use airodump-ng -w only.
-- BLUETOOTH: Use SAFE tools only: **hcitool** (scan, info, cc, con), **bluetoothctl** (scan on, info, power on, connect), **hciconfig** (adapters). Scan for devices: sudo hcitool scan. Get info: hcitool info [MAC]. Connect: bluetoothctl connect [MAC].
-- DO NOT use: sdptool (hangs), rfcomm (hangs), gatttool (broken), obexftp (hangs), bluesnarfer (hangs), l2ping (hangs). If enumeration needed, use bluetoothctl info [MAC] to check services. Start adapter with: sudo hciconfig hci0 up
-- If a command fails, do NOT retry the same command. Try a completely different approach.
-- When you are truly finished, use <done>what you accomplished</done> instead of a command.
-- NEVER touch wlan0 — that is the main internet connection. For all WiFi operations use wlan1 ONLY.
-
-Example turn:
-You: Let me check the network interfaces.
-<cmd>ip link show</cmd>
-
-Then I will reply with the real output, and you decide the next step."""
+CRITICAL:
+- Output ONE <cmd>...</cmd> per response. Wait for output.
+- No multiple <cmd> blocks. No guessing output.
+- Use sudo for root. Use `timeout N cmd` for time limits (max 35s).
+- wlan1 = monitor mode (NO airmon-ng). airodump-ng: write to file, read after.
+- BT safe: hcitool, bluetoothctl, hciconfig only. NO sdptool/rfcomm/gatttool.
+- Failed? Try different approach. Don't retry same tool.
+- When done: <done>accomplishment</done>
+- NEVER wlan0."""
 
 
-def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_message_history=10):
+def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_message_history=None):
     from ui_modal import init_ui
     ui = init_ui()
 
@@ -1331,9 +1276,15 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
     seed_bandit_skills()  # Auto-seed with bandit foundational strategies
     migrate_techniques_json(SCRIPT_DIR / 'techniques.json')
 
+    # Detect if Haiku — use aggressive token reduction for cost/speed
+    is_haiku = 'haiku' in provider.name.lower()
+    if max_message_history is None:
+        max_message_history = 4 if is_haiku else 10
+
     # Build system prompt with skills from experience (search by task keywords)
     # Only retrieve skills once at the start, not every turn (caching optimization)
-    skill_str = skills_context(task, limit=5)
+    skill_limit = 2 if is_haiku else 5  # Haiku: fetch only top 2 skills
+    skill_str = skills_context(task, limit=skill_limit, is_haiku=is_haiku)
     full_system = SYSTEM + ('\n\n' + skill_str if skill_str else '')
 
     # Fall back to static techniques if no skills yet
@@ -1383,10 +1334,11 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
 
     # Inject memory into first message if fresh start
     if not resume_data:
-        mem_ctx = memory_context(mem)
-        first_msg = f'Task: {task}\n\nYou have a live bash shell on Kali Linux. Send ONE command at a time. I will execute it and give you the real output. Go.'
+        # Include memory for learning/adaptation, but compact for Haiku
+        mem_ctx = memory_context(mem, compact=is_haiku)
+        first_msg = f'Task: {task}\n\nSend ONE command. Get output. Repeat.'
         if mem_ctx:
-            first_msg += f'\n\nHere is what you remember from previous sessions:\n{mem_ctx}'
+            first_msg += f'\n\n{mem_ctx}'
         messages.append({'role': 'user', 'content': first_msg})
 
     try:
@@ -1415,12 +1367,18 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
                         messages.append({'role': 'user', 'content': steer_content})
                         log.append({'turn': turn, 'type': 'steer', 'content': steer_line, 'ts': time.time()})
 
+            # Reviews: adaptive frequency. Haiku only reviews on failure, less often.
             if turn >= next_review_turn:
-                review = build_round_review(turn, log, mem, task)
+                review = build_round_review(turn, log, mem, task, is_haiku=is_haiku)
                 if review:
                     print(f'  {_DIM}↺ Review{_RST}')
                     messages.append({'role': 'user', 'content': review})
-                next_review_turn = turn + random.randint(3, 6)
+                # Haiku: longer intervals (only review failures, less often)
+                # Others: standard intervals
+                if is_haiku:
+                    next_review_turn = turn + random.randint(8, 15)
+                else:
+                    next_review_turn = turn + random.randint(3, 6)
 
             # ── LLM thinks ──
             t_llm_start = time.time()
@@ -1460,7 +1418,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
 
             # Display running token dashboard
             if usage:
-                print_token_dashboard(token_totals, turn, provider.name, log)
+                print_token_dashboard(token_totals, turn, provider.name, log, is_haiku=is_haiku)
             messages.append({'role': 'assistant', 'content': response})
             log.append({'turn': turn, 'type': 'thought', 'content': response, 'tokens': usage, 'ts': t_thought, 'llm_s': llm_inference})
 
@@ -1808,14 +1766,15 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
                     output = f'[command returned no output after {cmd_timeout}s — the shell has been reset.]'
 
             # Truncate for display, compress for context (token optimization)
-            display = output[:5000] + ('\n... [truncated]' if len(output) > 5000 else '')
-            context = compress_command_output(output, max_length=1500)
+            display_len = 2000 if is_haiku else 5000
+            display = output[:display_len] + ('\n... [truncated]' if len(output) > display_len else '')
+            context = compress_command_output(output, max_length=1500, is_haiku=is_haiku)
 
             print(f'  {_DIM}✓ {elapsed}s{_RST}')
             if display.strip():
                 print(f'\n{display}\n')
             _bar_update(action=f'{_GRN}✓{_RST} bash ({elapsed}s)')
-            messages.append({'role': 'user', 'content': f'Terminal output:\n```\n{context}\n```'})
+            messages.append({'role': 'user', 'content': f'Output: ```\n{context}\n```'})
             # Keep full output in log for debugging; only compressed version in messages
             log.append({'turn': turn, 'type': 'exec', 'cmd': cmd, 'output': output[:12000], 'ts': t_exec_start, 'exec_s': elapsed})
 
@@ -1833,7 +1792,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
 
     # ── Extract skills from successful session ──
     outcome = 'success' if turn_count > 0 else 'abandoned'
-    extract_skills_from_session(messages, mem, session_id, provider, outcome=outcome)
+    extract_skills_from_session(messages, mem, session_id, provider, outcome=outcome, is_haiku=is_haiku)
 
     # ── Print token usage summary ──
     if token_totals['input_tokens'] > 0 or token_totals['output_tokens'] > 0:

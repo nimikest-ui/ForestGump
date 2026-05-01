@@ -33,12 +33,13 @@ def _save_config(cfg):
     except Exception:
         pass
 
-_DIM = '\033[2m'
-_RST = '\033[0m'
-_BLD = '\033[1m'
-_GRN = '\033[32m'
-_RED = '\033[31m'
-_ORG = '\033[38;5;208m'   # Claude Code orange accent
+USE_COLOR = os.environ.get('COLOR') == '1'
+_DIM = '\033[2m' if USE_COLOR else ''
+_RST = '\033[0m' if USE_COLOR else ''
+_BLD = '\033[1m' if USE_COLOR else ''
+_GRN = '\033[32m' if USE_COLOR else ''
+_RED = '\033[31m' if USE_COLOR else ''
+_ORG = '\033[38;5;208m' if USE_COLOR else ''
 
 
 def _cols():
@@ -64,7 +65,7 @@ def _get_local_ollama_models():
         return set()
 
 
-_BLU = '\033[38;5;33m'   # 256-color dodger blue for slash commands
+_BLU = '\033[38;5;33m' if USE_COLOR else ''
 
 SLASH_COMMANDS = [
     ('/provider', 'switch AI provider — saved'),
@@ -80,12 +81,15 @@ def _hr():
 
 
 def _readline_slash():
-    """Custom input: typing '/' turns text blue + shows autocomplete dropdown."""
+    """Custom input: typing '/' shows autocomplete dropdown (unless COLOR=1)."""
     import re as _re
 
+    if not USE_COLOR:
+        return input()
+
     buf          = []
-    drop_sel     = -1    # selected dropdown index (-1 = none)
-    prev_lines   = 0     # dropdown lines rendered last pass
+    drop_sel     = -1
+    prev_lines   = 0
 
     fd  = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
@@ -239,71 +243,35 @@ class MenuSystem:
         self.providers = {
             'ollama': {
                 'label': 'Ollama',
-                'desc': 'Local & cloud models',
+                'desc': 'Fast local/cloud',
                 'models': {
-                    # Cloud
-                    'glm-5.1-cloud':           '☁  GLM 5.1 · 1.5TB · Agentic flagship',
-                    'glm-5-cloud':             '☁  GLM 5 · 756GB · Reasoning engine',
-                    'glm-4.7-cloud':           '☁  GLM 4.7 · 696GB · Strong coder',
-                    'kimi-k2.6-cloud':         '☁  Kimi K2.6 · 595GB · Multimodal',
-                    'kimi-k2.5-cloud':         '☁  Kimi K2.5 · 1.1TB · Vision + thinking',
-                    'minimax-m2.7-cloud':      '☁  MiniMax M2.7 · 481GB · Agentic',
-                    'minimax-m2.5-cloud':      '☁  MiniMax M2.5 · 230GB · Coding',
-                    'devstral-2-cloud':        '☁  Devstral-2 · 128GB · 123B eng',
-                    'deepseek-v3.2-cloud':     '☁  DeepSeek V3.2 · 689GB · MoE',
-                    'mistral-large-3-cloud':   '☁  Mistral Large · 682GB · Prod',
-                    'gemma4-cloud':            '☁  Gemma 4 · 62GB · Vision + code',
-                    'nemotron-3-super-cloud':  '☁  Nemotron 3 · 230GB · MoE agent',
-                    # Local
-                    'llama3.2:latest':         '⬡  Llama 3.2 · 2GB · General',
-                    'llama3.1:latest':         '⬡  Llama 3.1 · 4GB · Strong',
-                    'gemma3:27b':              '⬡  Gemma 3 · 55GB · Efficient',
-                    'mistral:latest':          '⬡  Mistral 7B · Fast',
-                    'neural-chat:7b':          '⬡  Neural Chat · 4GB · Conv',
-                    'ministral-3:8b':          '⬡  Ministral 3 · 10GB · Balanced',
-                    'qwen3.5:0.8b':            '⬡  Qwen 3.5 0.8B · 1GB · Ultra-lite',
-                    'functiongemma:latest':    '⬡  FunctionGemma · 300MB',
-                    'tinyllama:1.1b':          '⬡  TinyLlama · 1.1B · Minimal',
-                    'deepseek-r1:8b':          '⬡  DeepSeek-R1 · Reasoning',
-                    'phi4-reasoning:14b':      '⬡  Phi-4 Reasoning · Math',
-                    'llama3.2-vision:11b':     '⬡  Llama Vision · Image',
-                    'moondream:1.8b':          '⬡  Moondream · Edge vision',
-                    'codellama:34b':           '⬡  Code Llama · Code gen',
-                    'devstral-small-2:24b':    '⬡  Devstral Small · 51GB',
-                    'rnj-1:8b':               '⬡  RNJ-1 · Coding + STEM',
+                    'glm-5.1-cloud': 'GLM 5.1 · Agentic',
+                    'llama3.2:latest': 'Llama 3.2 · Fast',
+                    'mistral:latest': 'Mistral 7B',
                 }
             },
             'claude': {
                 'label': 'Claude CLI',
-                'desc': 'OAuth · Pro subscription · no API key',
+                'desc': 'Pro · OAuth',
                 'models': {
-                    'sonnet': 'Claude Sonnet (default)',
-                    'opus':   'Claude Opus',
+                    'sonnet': 'Claude Sonnet',
+                    'haiku': 'Claude Haiku · Fast',
                 }
             },
             'anthropic': {
                 'label': 'Anthropic API',
-                'desc': 'Direct API · needs ANTHROPIC_API_KEY',
+                'desc': 'ANTHROPIC_API_KEY',
                 'models': {
-                    'claude-sonnet-4-20250514': 'Claude Sonnet 4',
-                    'claude-opus-4-1-20250805': 'Claude Opus 4.1',
+                    'claude-opus-4-7': 'Claude Opus 4.7',
+                    'claude-haiku-4-5-20251001': 'Claude Haiku · Fast',
                 }
             },
             'copilot': {
                 'label': 'GitHub Copilot',
-                'desc': 'gh auth session · no API key',
+                'desc': 'gh auth',
                 'models': {
-                    'claude-sonnet-4.5': 'Claude Sonnet 4.5',
-                    'claude-sonnet-4.6': 'Claude Sonnet 4.6',
-                    'claude-sonnet-4':   'Claude Sonnet 4',
-                    'claude-haiku-4.5':  'Claude Haiku 4.5 · Fast',
-                    'gpt-5.4':           'GPT-5.4',
-                    'gpt-5.4-mini':      'GPT-5.4 Mini',
-                    'gpt-5-mini':        'GPT-5 Mini',
-                    'gpt-5.2':           'GPT-5.2',
-                    'gpt-5.3-codex':     'GPT-5.3 Codex · Code',
-                    'gpt-5.2-codex':     'GPT-5.2 Codex · Code',
-                    'gpt-4.1':           'GPT-4.1',
+                    'claude-haiku-4.5': 'Haiku · Fast',
+                    'claude-sonnet-4.6': 'Sonnet 4.6',
                 }
             }
         }
@@ -338,7 +306,10 @@ class MenuSystem:
         sys.stdout.flush()
 
     def display_header(self):
-        print(f'\n {_ORG}●{_RST} {_BLD}Agent{_RST}\n')
+        if NO_COLOR:
+            print('ForestGump\n')
+        else:
+            print(f'\n {_ORG}●{_RST} {_BLD}Agent{_RST}\n')
 
     def getch_unix(self):
         if os.name != 'posix':
@@ -406,7 +377,8 @@ class MenuSystem:
 
             print()
             _hr()
-            print(f' {_DIM}↑↓ navigate   ↵ select   h history   q quit{_RST}')
+            nav_text = '↑↓ ↵' if NO_COLOR else f' {_DIM}↑↓ navigate   ↵ select   h history   q quit{_RST}'
+            print(f' {nav_text}')
 
             try:
                 ch = self.getch_unix()
@@ -528,9 +500,10 @@ class MenuSystem:
 
             print()
             _hr()
-            if follow_up_task:
+            if follow_up_task and not NO_COLOR:
                 print(f'  {_DIM}follow-up: {follow_up_task[:60]}{_RST}')
-            print(f'  {_DIM}↑↓ navigate  ↵ resume  q cancel{_RST}')
+            nav_text = '↑↓ ↵' if NO_COLOR else f'  {_DIM}↑↓ navigate  ↵ resume  q cancel{_RST}'
+            print(nav_text)
 
             try:
                 ch = self.getch_unix()
@@ -626,11 +599,11 @@ class MenuSystem:
                 self.display_header()
                 print(f' {_BLD}{provider}{_RST}  {_DIM}{model}{_RST}\n')
 
-                if self.history:
+                if self.history and not NO_COLOR:
                     print(f' {_DIM}Recent{_RST}')
-                    for entry in self.history[-3:]:
-                        dt = datetime.fromisoformat(entry['timestamp']).strftime('%H:%M')
-                        print(f'  {_DIM}↳ [{dt}] {entry["task"][:60]}{_RST}')
+                    entry = self.history[-1]
+                    dt = datetime.fromisoformat(entry['timestamp']).strftime('%H:%M')
+                    print(f'  {_DIM}↳ [{dt}] {entry["task"][:60]}{_RST}')
                     print()
 
                 sessions = _load_sessions(SCRIPT_DIR / 'sessions', limit=1)

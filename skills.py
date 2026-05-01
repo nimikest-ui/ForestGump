@@ -44,46 +44,31 @@ def seed_bandit_skills():
     init_db()
     with sqlite3.connect(SKILLS_DB) as conn:
         cursor = conn.cursor()
-        # Check if bandit skills already exist
         cursor.execute("SELECT COUNT(*) FROM skills WHERE tags LIKE '%bandit%'")
         if cursor.fetchone()[0] > 0:
-            return  # Already seeded
+            return
 
         bandit_skills = [
             {
-                'name': 'SSH to Bandit Level with sshpass',
-                'problem': 'Log into bandit challenge with SSH',
-                'solution': 'Use sshpass for non-interactive password auth, disable host key checking',
-                'template': "sshpass -p '{password}' ssh -o StrictHostKeyChecking=no {user}@bandit.labs.overthewire.org -p 2220 '{command}'",
-                'tags': 'bandit,ssh,sshpass,challenge'
+                'name': 'SSH Bandit with sshpass',
+                'problem': 'SSH into bandit',
+                'solution': 'sshpass non-interactive auth',
+                'template': "sshpass -p '{password}' ssh -o StrictHostKeyChecking=no {user}@bandit.labs.overthewire.org -p 2220",
+                'tags': 'bandit,ssh,sshpass'
             },
             {
-                'name': 'Read File with Special Characters in Filename',
-                'problem': 'File has dashes or special chars that confuse cat/shell',
-                'solution': 'Use ./ prefix for dashes, or -- option separator',
-                'template': "cat -- '{filename}'  # or cat ./{filename}",
-                'tags': 'bandit,filename,special-chars,cat'
-            },
-            {
-                'name': 'Find File by Size and Properties',
-                'problem': 'Need to locate file matching specific size/permissions/type',
-                'solution': 'Use find with -size, -type, -perm filters; pipe to file command to check content type',
-                'template': "find . -type f -size {size}c ! -executable -exec file {} \\; | grep ASCII",
-                'tags': 'bandit,find,file-hunting,permissions'
+                'name': 'Read Files with Special Chars',
+                'problem': 'File has dashes/special chars',
+                'solution': 'Use ./ prefix or -- separator',
+                'template': "cat -- '{filename}'",
+                'tags': 'bandit,filename,cat'
             },
             {
                 'name': 'Decompress Layered Archives',
-                'problem': 'File is hex-dumped or multiply compressed (gzip, bzip2, tar)',
-                'solution': 'Use xxd -r to reverse hexdump, then decompress layer by layer with gunzip, bzip2 -d, tar',
-                'template': "xxd -r data.txt | gunzip | bzip2 -d | tar xf - # Repeat as needed",
-                'tags': 'bandit,compression,archive,decompression'
-            },
-            {
-                'name': 'Extract Password from Readme or Special File',
-                'problem': 'Password is in a readme or hidden file in home directory',
-                'solution': 'Always check for readme, .secret, or other text files; read with cat',
-                'template': "cat readme  # or cat .secret or ls -la to find hidden files",
-                'tags': 'bandit,password,readme,text-extraction'
+                'problem': 'File is hex/compressed (gzip,tar)',
+                'solution': 'xxd -r | gunzip | tar',
+                'template': "xxd -r {file} | gunzip | tar xf -",
+                'tags': 'bandit,compression,archive'
             }
         ]
 
@@ -218,11 +203,10 @@ def get_all_skills(limit: int = 20) -> list[dict]:
         return [dict(row) for row in cursor.fetchall()]
 
 
-def skills_context(query: str = '', limit: int = 5) -> str:
-    """
-    Format skills into a readable prompt context.
-    If query is provided, search first; otherwise return top skills.
-    """
+def skills_context(query: str = '', limit: int = 5, is_haiku: bool = False) -> str:
+    """Format skills into prompt context. Haiku gets compact format."""
+    if is_haiku:
+        limit = min(2, limit)
     if query:
         skills = search_skills(query, limit=limit)
     else:
@@ -230,6 +214,12 @@ def skills_context(query: str = '', limit: int = 5) -> str:
 
     if not skills:
         return ''
+
+    if is_haiku:
+        lines = []
+        for skill in skills:
+            lines.append(f"[{skill['name']}] {skill['tags']} ({skill['success_rate']:.0%})")
+        return 'SKILLS: ' + ' | '.join(lines)
 
     lines = ['PROVEN SKILLS (from previous successful sessions):']
     for skill in skills:
@@ -247,12 +237,9 @@ def skills_context(query: str = '', limit: int = 5) -> str:
     return '\n'.join(lines)
 
 
-def extract_skills_from_session(messages: list, memory: dict, session_id: str, provider, outcome: str = 'success') -> list[dict]:
-    """
-    Extract reusable skills from a successful session.
-    Ask the LLM to summarize the successful steps as reusable techniques.
-    """
-    if outcome == 'abandoned':
+def extract_skills_from_session(messages: list, memory: dict, session_id: str, provider, outcome: str = 'success', is_haiku: bool = False) -> list[dict]:
+    """Extract reusable skills. Skip for Haiku (one-off runs)."""
+    if outcome == 'abandoned' or is_haiku:
         return []
 
     # Build a concise summary of the session for the LLM
