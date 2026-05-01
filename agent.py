@@ -67,7 +67,7 @@ _ORG = '\033[38;5;208m' if _USE_COLOR else ''
 
 # ── Bottom status bar state ──────────────────────────────────
 _bar_active = False
-_bar_state  = {'mode': 'manual', 'session_tok': 0, 'turn': 0, 'action': '', 'session_start_time': 0.0}
+_bar_state  = {'mode': 'manual', 'session_tok': 0, 'turn': 0, 'action': '', 'session_start_time': 0.0, 'tokens_remaining': 0}
 
 
 def _ansi_strip(s):
@@ -88,28 +88,28 @@ def _bar_render():
     turn = _bar_state['turn']
     act  = _bar_state['action']
     start = _bar_state['session_start_time']
+    remaining = _bar_state['tokens_remaining']
 
     mode_fmt = f'{_ORG}auto{_RST}' if mode == 'auto' else f'{_DIM}manual{_RST}'
     turn_fmt = f'{_DIM}turn {turn}{_RST}' if turn else ''
     tok_fmt  = f'{_DIM}{tok:,} tok{_RST}'
 
-    # Time tracking: percentage of 6-hour budget (21600 seconds)
-    time_fmt = ''
-    if start > 0:
-        elapsed = time.time() - start
-        percent = (elapsed / 21600) * 100
-        time_fmt = f' {percent:.1f}%'
+    # Rate limit tracking: show remaining tokens if available
+    limit_fmt = ''
+    if remaining > 0:
+        percent = (remaining / max(remaining + tok, 1)) * 100
+        limit_fmt = f' | {percent:.0f}% remain'
 
     hr       = f'{_DIM}{"─" * cols}{_RST}'
 
     center      = f'{turn_fmt}  {mode_fmt}' if turn_fmt else mode_fmt
     act_len     = len(_ansi_strip(act))
     center_len  = len(_ansi_strip(center))
-    tok_len     = len(_ansi_strip(tok_fmt + time_fmt))
+    tok_len     = len(_ansi_strip(tok_fmt + limit_fmt))
     space       = cols - act_len - center_len - tok_len - 4
     pad_l       = max(1, space // 2)
     pad_r       = max(1, space - pad_l)
-    line2       = f' {act}{" " * pad_l}{center}{" " * pad_r}{tok_fmt}{time_fmt} '
+    line2       = f' {act}{" " * pad_l}{center}{" " * pad_r}{tok_fmt}{limit_fmt} '
 
     sys.stdout.write(
         '\033[s'
@@ -425,6 +425,11 @@ class AnthropicProvider:
             'cache_creation_input_tokens': getattr(r.usage, 'cache_creation_input_tokens', 0),
             'cache_read_input_tokens': getattr(r.usage, 'cache_read_input_tokens', 0),
         }
+        # Extract rate limit headers from response
+        if hasattr(r, '_response') and hasattr(r._response, 'headers'):
+            headers = r._response.headers
+            usage['tokens_remaining'] = int(headers.get('anthropic-ratelimit-tokens-remaining', 0))
+            usage['tokens_reset'] = headers.get('anthropic-ratelimit-tokens-reset', '')
         return r.content[0].text, usage
 
 
@@ -1413,6 +1418,10 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
                 token_totals['output_tokens'] += usage.get('output_tokens', 0)
                 token_totals['cache_creation_input_tokens'] += usage.get('cache_creation_input_tokens', 0)
                 token_totals['cache_read_input_tokens'] += usage.get('cache_read_input_tokens', 0)
+                # Update status bar with remaining tokens from rate limit (Anthropic only)
+                if usage.get('tokens_remaining'):
+                    _bar_update(session_tok=token_totals['input_tokens'] + token_totals['output_tokens'],
+                               tokens_remaining=usage['tokens_remaining'])
 
             # Display agent response with token info (including cache hits if available)
             if usage:
