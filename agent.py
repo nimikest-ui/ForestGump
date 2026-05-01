@@ -67,7 +67,7 @@ _ORG = '\033[38;5;208m' if _USE_COLOR else ''
 
 # ── Bottom status bar state ──────────────────────────────────
 _bar_active = False
-_bar_state  = {'mode': 'manual', 'session_tok': 0, 'turn': 0, 'action': ''}
+_bar_state  = {'mode': 'manual', 'session_tok': 0, 'turn': 0, 'action': '', 'session_start_time': 0.0}
 
 
 def _ansi_strip(s):
@@ -87,20 +87,29 @@ def _bar_render():
     tok  = _bar_state['session_tok']
     turn = _bar_state['turn']
     act  = _bar_state['action']
+    start = _bar_state['session_start_time']
 
     mode_fmt = f'{_ORG}auto{_RST}' if mode == 'auto' else f'{_DIM}manual{_RST}'
     turn_fmt = f'{_DIM}turn {turn}{_RST}' if turn else ''
     tok_fmt  = f'{_DIM}{tok:,} tok{_RST}'
+
+    # Time tracking: percentage of 6-hour budget (21600 seconds)
+    time_fmt = ''
+    if start > 0:
+        elapsed = time.time() - start
+        percent = (elapsed / 21600) * 100
+        time_fmt = f' {percent:.1f}%'
+
     hr       = f'{_DIM}{"─" * cols}{_RST}'
 
     center      = f'{turn_fmt}  {mode_fmt}' if turn_fmt else mode_fmt
     act_len     = len(_ansi_strip(act))
     center_len  = len(_ansi_strip(center))
-    tok_len     = len(_ansi_strip(tok_fmt))
+    tok_len     = len(_ansi_strip(tok_fmt + time_fmt))
     space       = cols - act_len - center_len - tok_len - 4
     pad_l       = max(1, space // 2)
     pad_r       = max(1, space - pad_l)
-    line2       = f' {act}{" " * pad_l}{center}{" " * pad_r}{tok_fmt} '
+    line2       = f' {act}{" " * pad_l}{center}{" " * pad_r}{tok_fmt}{time_fmt} '
 
     sys.stdout.write(
         '\033[s'
@@ -1330,6 +1339,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
     _bar_state['mode'] = 'auto' if not confirm else 'manual'
     _bar_state['session_tok'] = 0
     _bar_state['turn'] = 0
+    _bar_state['session_start_time'] = time.time()  # Track for 6-hour budget
     _bar_setup()
 
     # Inject memory into first message if fresh start
