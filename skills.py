@@ -39,6 +39,81 @@ def init_db():
         conn.commit()
 
 
+def seed_bandit_skills():
+    """Seed database with foundational bandit strategies on first run."""
+    init_db()
+    with sqlite3.connect(SKILLS_DB) as conn:
+        cursor = conn.cursor()
+        # Check if bandit skills already exist
+        cursor.execute("SELECT COUNT(*) FROM skills WHERE tags LIKE '%bandit%'")
+        if cursor.fetchone()[0] > 0:
+            return  # Already seeded
+
+        bandit_skills = [
+            {
+                'name': 'SSH to Bandit Level with sshpass',
+                'problem': 'Log into bandit challenge with SSH',
+                'solution': 'Use sshpass for non-interactive password auth, disable host key checking',
+                'template': "sshpass -p '{password}' ssh -o StrictHostKeyChecking=no {user}@bandit.labs.overthewire.org -p 2220 '{command}'",
+                'tags': 'bandit,ssh,sshpass,challenge'
+            },
+            {
+                'name': 'Read File with Special Characters in Filename',
+                'problem': 'File has dashes or special chars that confuse cat/shell',
+                'solution': 'Use ./ prefix for dashes, or -- option separator',
+                'template': "cat -- '{filename}'  # or cat ./{filename}",
+                'tags': 'bandit,filename,special-chars,cat'
+            },
+            {
+                'name': 'Find File by Size and Properties',
+                'problem': 'Need to locate file matching specific size/permissions/type',
+                'solution': 'Use find with -size, -type, -perm filters; pipe to file command to check content type',
+                'template': "find . -type f -size {size}c ! -executable -exec file {} \\; | grep ASCII",
+                'tags': 'bandit,find,file-hunting,permissions'
+            },
+            {
+                'name': 'Decompress Layered Archives',
+                'problem': 'File is hex-dumped or multiply compressed (gzip, bzip2, tar)',
+                'solution': 'Use xxd -r to reverse hexdump, then decompress layer by layer with gunzip, bzip2 -d, tar',
+                'template': "xxd -r data.txt | gunzip | bzip2 -d | tar xf - # Repeat as needed",
+                'tags': 'bandit,compression,archive,decompression'
+            },
+            {
+                'name': 'Extract Password from Readme or Special File',
+                'problem': 'Password is in a readme or hidden file in home directory',
+                'solution': 'Always check for readme, .secret, or other text files; read with cat',
+                'template': "cat readme  # or cat .secret or ls -la to find hidden files",
+                'tags': 'bandit,password,readme,text-extraction'
+            }
+        ]
+
+        for skill in bandit_skills:
+            cursor.execute("""
+                INSERT INTO skills (name, problem, solution, template, tags, source_session)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                skill.get('name'),
+                skill.get('problem'),
+                skill.get('solution'),
+                skill.get('template'),
+                skill.get('tags'),
+                'bandit-seed'
+            ))
+            skill_id = cursor.lastrowid
+            cursor.execute("""
+                INSERT INTO skills_fts (rowid, name, problem, solution, template, tags)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                skill_id,
+                skill.get('name'),
+                skill.get('problem'),
+                skill.get('solution'),
+                skill.get('template'),
+                skill.get('tags')
+            ))
+        conn.commit()
+
+
 def save_skill(skill: dict, source_session: str = None) -> int:
     """
     Save a skill to the database.

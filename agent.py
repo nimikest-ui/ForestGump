@@ -47,7 +47,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from skills import init_db as init_skills_db, skills_context, extract_skills_from_session, migrate_techniques_json
+from skills import init_db as init_skills_db, skills_context, extract_skills_from_session, migrate_techniques_json, seed_bandit_skills
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 SESSIONS_DIR = SCRIPT_DIR / 'sessions'
@@ -1328,6 +1328,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
 
     # Initialize skills DB and migrate techniques.json on first run
     init_skills_db()
+    seed_bandit_skills()  # Auto-seed with bandit foundational strategies
     migrate_techniques_json(SCRIPT_DIR / 'techniques.json')
 
     # Build system prompt with skills from experience (search by task keywords)
