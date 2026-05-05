@@ -12,12 +12,49 @@ import subprocess
 import json
 import termios
 import tty
+import threading
 from pathlib import Path
 from datetime import datetime
+
+try:
+    from prompt_toolkit import PromptSession, Application
+    from prompt_toolkit.layout import Layout, HSplit, Window, WindowAlign
+    from prompt_toolkit.widgets import TextArea
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+    from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.styles import Style as PTStyle
+    from prompt_toolkit.patch_stdout import patch_stdout
+    _PT_AVAILABLE = True
+except ImportError:
+    _PT_AVAILABLE = False
+
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    _RICH_AVAILABLE = True
+except ImportError:
+    _RICH_AVAILABLE = False
 
 SCRIPT_DIR   = Path(__file__).parent.resolve()
 HISTORY_FILE = SCRIPT_DIR / '.menu_history.json'
 CONFIG_FILE  = SCRIPT_DIR / '.agent_config.json'
+
+# Import agent directly (instead of subprocess)
+try:
+    sys.path.insert(0, str(SCRIPT_DIR))
+    from agent import (
+        run_agent,
+        ClaudeCliProvider,
+        OllamaProvider,
+        AnthropicProvider,
+        CopilotProvider,
+    )
+    _AGENT_DIRECT = True
+except ImportError:
+    _AGENT_DIRECT = False
 
 
 def _load_config():
@@ -34,12 +71,15 @@ def _save_config(cfg):
         pass
 
 USE_COLOR = os.environ.get('COLOR') == '1'
+NO_COLOR = os.environ.get('NO_COLOR', '1') == '1'
 _DIM = '\033[2m' if USE_COLOR else ''
 _RST = '\033[0m' if USE_COLOR else ''
 _BLD = '\033[1m' if USE_COLOR else ''
 _GRN = '\033[32m' if USE_COLOR else ''
 _RED = '\033[31m' if USE_COLOR else ''
-_ORG = '\033[38;5;208m' if USE_COLOR else ''
+_GLD = '\033[1;38;2;255;215;0m' if USE_COLOR else ''  # #FFD700 gold (Hermes theme)
+_AMB = '\033[38;2;255;191;0m' if USE_COLOR else ''   # #FFBF00 amber
+_BRZ = '\033[38;2;205;127;50m' if USE_COLOR else ''  # #CD7F32 bronze
 
 
 def _cols():
@@ -80,6 +120,47 @@ def _hr():
     print(f'{_DIM}{"─" * _cols()}{_RST}')
 
 
+# ─── Hermes-style branding and UI ───
+
+FOREST_GUMP_LOGO = """[bold #FFD700]███████╗ ██████╗ ██████╗ ███████╗███████╗████████╗[/]
+[#FFBF00]██╔════╝██╔═══██╗██╔══██╗██╔════╝██╔════╝╚══██╔══╝[/]
+[#FFBF00]█████╗  ██║   ██║██████╔╝█████╗  ███████╗   ██║[/]
+[#CD7F32]██╔══╝  ██║   ██║██╔══██╗██╔══╝  ╚════██║   ██║[/]
+[#CD7F32]██║     ╚██████╔╝██║  ██║███████╗███████║   ██║[/]
+[#B8860B]╚═╝      ╚═════╝ ╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝[/]"""
+
+
+class SlashCompleter(Completer):
+    """prompt_toolkit Completer for slash commands."""
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        if text.startswith('/'):
+            for cmd, desc in SLASH_COMMANDS:
+                if cmd.startswith(text):
+                    yield Completion(cmd[len(text):], display=cmd, display_meta=desc)
+
+
+def _print_banner(provider, model, history):
+    """Print a Hermes-style Rich banner at startup."""
+    if not _RICH_AVAILABLE:
+        print(f'\n {_GLD}⚕{_RST} {_BLD}Forest Gump{_RST}\n')
+        return
+
+    console = Console()
+    last = f"Last: {history[-1]['task'][:40]}…" if history else "No history"
+    body = (
+        f"{FOREST_GUMP_LOGO}\n\n"
+        f"[dim]Provider[/dim]  [bold #FFBF00]{provider}[/bold #FFBF00]  [dim]{model}[/dim]\n"
+        f"[dim]{last}[/dim]"
+    )
+    console.print(Panel(
+        body,
+        title="[bold #FFD700]⚕ Bare Metal Agent[/bold #FFD700]",
+        border_style="#CD7F32",
+        padding=(0, 2),
+    ))
+
+
 def _readline_slash():
     """Custom input: typing '/' shows autocomplete dropdown (unless COLOR=1)."""
     import re as _re
@@ -108,7 +189,7 @@ def _readline_slash():
         colored = f'{_BLU}{_BLD}{text}{_RST}' if is_slash else text
 
         # Draw input line
-        sys.stdout.write(f'\r\033[K {_ORG}>{_RST} {colored}')
+        sys.stdout.write(f'\r\033[K {_GLD}>{_RST} {colored}')
 
         # Draw / clear dropdown lines below
         n = max(len(matches), prev_lines)
@@ -116,7 +197,7 @@ def _readline_slash():
             if i < len(matches):
                 cmd, desc = matches[i]
                 if i == drop_sel:
-                    row = f'  {_ORG}❯{_RST} {_BLU}{_BLD}{cmd:<{_CMD_WIDTH}}{_RST}  {_DIM}{desc}{_RST}'
+                    row = f'  {_GLD}❯{_RST} {_BLU}{_BLD}{cmd:<{_CMD_WIDTH}}{_RST}  {_DIM}{desc}{_RST}'
                 else:
                     row = f'    {_BLU}{cmd:<{_CMD_WIDTH}}{_RST}  {_DIM}{desc}{_RST}'
             else:
@@ -309,7 +390,7 @@ class MenuSystem:
         if NO_COLOR:
             print('ForestGump\n')
         else:
-            print(f'\n {_ORG}●{_RST} {_BLD}Agent{_RST}\n')
+            print(f'\n {_GLD}●{_RST} {_BLD}Agent{_RST}\n')
 
     def getch_unix(self):
         if os.name != 'posix':
@@ -354,13 +435,13 @@ class MenuSystem:
                 installed  = raw_desc.startswith('\x00LOCAL\x00')
                 clean_desc = raw_desc[7:] if installed else raw_desc
                 if i == selected:
-                    marker = f'{_ORG}❯{_RST}'
+                    marker = f'{_GLD}❯{_RST}'
                     label  = f'{_BLD}{options[i]}{_RST}'
                 else:
                     marker = ' '
                     label  = f'{_DIM}{options[i]}{_RST}'
                 if installed:
-                    desc = f'  {_ORG}●{_RST} {_DIM}{clean_desc}{_RST}'
+                    desc = f'  {_GLD}●{_RST} {_DIM}{clean_desc}{_RST}'
                 else:
                     desc = f'  {_DIM}{clean_desc}{_RST}' if clean_desc else ''
                 print(f'  {marker} {label}{desc}')
@@ -431,7 +512,7 @@ class MenuSystem:
                 print(f'  [{i}] {option}{desc}')
             print()
             _hr()
-            print(f' {_ORG}>{_RST} ', end='', flush=True)
+            print(f' {_GLD}>{_RST} ', end='', flush=True)
             choice = input().strip()
             if choice.lower() == 'q':
                 sys.exit(0)
@@ -490,7 +571,7 @@ class MenuSystem:
                 task_pre = s['task'][:task_max] + ('…' if len(s['task']) > task_max else '')
                 line = f'{age:<8}  {provider:<14}  {turns:<4}  {task_pre}'
                 if i == selected:
-                    print(f'  {_ORG}❯{_RST} {_BLD}{line}{_RST}')
+                    print(f'  {_GLD}❯{_RST} {_BLD}{line}{_RST}')
                 else:
                     print(f'    {_DIM}{line}{_RST}')
 
@@ -576,12 +657,38 @@ class MenuSystem:
             print(f' {_RED}✗{_RST} {e}')
             sys.exit(1)
 
-    def _execute_agent(self, provider, model, task):
-        cmd = ['python3', 'agent.py', '--provider', provider, '--model', model, task]
+    def _execute_agent(self, provider_name, model, task):
+        """Execute agent directly (no subprocess) or via subprocess if import fails."""
+        if _AGENT_DIRECT:
+            try:
+                # Build provider object
+                if provider_name == 'claude':
+                    provider = ClaudeCliProvider(model or 'haiku')
+                elif provider_name == 'anthropic':
+                    if not os.environ.get('ANTHROPIC_API_KEY'):
+                        print(f'{_RED}✗{_RST} Set ANTHROPIC_API_KEY environment variable.')
+                        return
+                    provider = AnthropicProvider(model or 'claude-sonnet-4-20250514')
+                elif provider_name == 'copilot':
+                    provider = CopilotProvider(model or 'claude-sonnet-4.5')
+                else:  # ollama
+                    default_model = 'gpt-oss:120b-cloud' if os.environ.get('OLLAMA_API_KEY') else 'llama3.2:latest'
+                    provider = OllamaProvider(model=model or default_model)
+
+                # Run agent directly in same process
+                run_agent(provider, task, max_turns=50, confirm=True, resume_data=None)
+                # Don't exit — return to menu for next task
+                return
+            except Exception as e:
+                print(f'{_RED}✗{_RST} Agent error: {e}')
+                return
+
+        # Fallback to subprocess if agent not importable
+        cmd = ['python3', 'agent.py', '--provider', provider_name, '--model', model, task]
         result = subprocess.run(cmd, cwd=SCRIPT_DIR, env=os.environ.copy())
         sys.exit(result.returncode)
 
-    def run(self):
+    def run(self, initial_task=None):
         try:
             # Load saved provider/model; fall back to defaults — no startup menus
             cfg      = _load_config()
@@ -593,11 +700,42 @@ class MenuSystem:
             if model not in self.providers[provider]['models']:
                 model = list(self.providers[provider]['models'].keys())[0]
 
-            # Task prompt loop — /provider and /model loop back; /resume + task launch
-            while True:
-                self.clear_screen()
-                self.display_header()
-                print(f' {_BLD}{provider}{_RST}  {_DIM}{model}{_RST}\n')
+            # Use fixed input area with patch_stdout if prompt_toolkit available
+            if _PT_AVAILABLE:
+                self._run_with_fixed_input(provider, model, initial_task=initial_task)
+            else:
+                self._run_fallback(provider, model, initial_task=initial_task)
+
+        except KeyboardInterrupt:
+            print(f'\n {_DIM}quit{_RST}')
+            sys.exit(1)
+
+    def _run_with_fixed_input(self, provider, model, initial_task=None):
+        """Run with PromptSession and fixed input prompt.
+
+        Shows agent output above a fixed prompt line, with slash command autocomplete.
+        Agent runs in foreground; user can interrupt with Ctrl+C.
+        """
+        prompt_session = PromptSession(
+            history=FileHistory(str(SCRIPT_DIR / '.prompt_history')),
+            auto_suggest=AutoSuggestFromHistory(),
+            completer=SlashCompleter(),
+            complete_while_typing=True,
+            style=PTStyle.from_dict({
+                'completion-menu.completion': 'bg:#1a1a2e #FFF8DC',
+                'completion-menu.completion.current': 'bg:#FFD700 #1a1a2e bold',
+                'completion-menu.meta.completion': 'bg:#1a1a2e #B8860B',
+                'completion-menu.meta.completion.current': 'bg:#FFBF00 #1a1a2e',
+            }) if USE_COLOR else None,
+        )
+
+        first_run = True
+        while True:
+            try:
+                # Show banner
+                if not first_run:
+                    print()
+                _print_banner(provider, model, self.history)
 
                 if self.history and not NO_COLOR:
                     print(f' {_DIM}Recent{_RST}')
@@ -608,28 +746,31 @@ class MenuSystem:
 
                 sessions = _load_sessions(SCRIPT_DIR / 'sessions', limit=1)
                 if sessions:
-                    s   = sessions[0]
+                    s = sessions[0]
                     age = _rel_time(s['ts'])
-                    print(f'  {_ORG}/resume{_RST}  {_DIM}↳ last: {age}  {s["turns"]}t  {s["task"][:48]}{_RST}')
+                    print(f'  {_GLD}/resume{_RST}  {_DIM}↳ {age}  {s["turns"]}t  {s["task"][:48]}{_RST}')
                     print()
 
-                _hr()
-                try:
-                    task = _readline_slash().strip()
-                except Exception:
-                    print(f' {_ORG}>{_RST} ', end='', flush=True)
-                    task = input().strip()
+                first_run = False
+
+                # Get input
+                if initial_task:
+                    task = initial_task
+                    initial_task = None
+                    print(f'{_GLD}❯ {_RST}{task}')  # Echo the task
+                else:
+                    task = prompt_session.prompt(f'{_GLD}❯ {_RST}').strip()
 
                 if not task:
                     continue
 
                 if task.lower() == '/provider':
-                    provider_names  = list(self.providers.keys())
+                    provider_names = list(self.providers.keys())
                     provider_labels = [self.providers[p]['label'] for p in provider_names]
-                    provider_descs  = [self.providers[p]['desc']  for p in provider_names]
+                    provider_descs = [self.providers[p]['desc'] for p in provider_names]
                     provider_idx = self.show_menu('Select Provider', provider_labels, provider_descs)
-                    provider     = provider_names[provider_idx]
-                    model        = self._pick_model(provider)
+                    provider = provider_names[provider_idx]
+                    model = self._pick_model(provider)
                     _save_config({'provider': provider, 'model': model})
                     continue
 
@@ -643,13 +784,77 @@ class MenuSystem:
                     self._pick_session(follow_up_task=follow_up)
                     return
 
+                # Execute agent
                 self._save_history(provider, model, task)
                 _save_config({'provider': provider, 'model': model})
+                print(f'\n{_GLD}⚔ bash{_RST}\n')
                 self._execute_agent(provider, model, task)
 
-        except KeyboardInterrupt:
-            print(f'\n {_DIM}quit{_RST}')
-            sys.exit(1)
+            except KeyboardInterrupt:
+                print(f'\n {_DIM}quit{_RST}')
+                return
+
+    def _run_fallback(self, provider, model, initial_task=None):
+        """Fallback to raw terminal input without fixed input area."""
+        first_run = True
+        # Task prompt loop — /provider and /model loop back; /resume + task launch
+        while True:
+            if first_run:
+                # Show banner once at startup
+                _print_banner(provider, model, self.history)
+                first_run = False
+            else:
+                self.clear_screen()
+                self.display_header()
+                print(f' {_BLD}{provider}{_RST}  {_DIM}{model}{_RST}\n')
+
+            if self.history and not NO_COLOR:
+                print(f' {_DIM}Recent{_RST}')
+                entry = self.history[-1]
+                dt = datetime.fromisoformat(entry['timestamp']).strftime('%H:%M')
+                print(f'  {_DIM}↳ [{dt}] {entry["task"][:60]}{_RST}')
+                print()
+
+            sessions = _load_sessions(SCRIPT_DIR / 'sessions', limit=1)
+            if sessions:
+                s   = sessions[0]
+                age = _rel_time(s['ts'])
+                print(f'  {_GLD}/resume{_RST}  {_DIM}↳ last: {age}  {s["turns"]}t  {s["task"][:48]}{_RST}')
+                print()
+
+            _hr()
+            try:
+                task = _readline_slash().strip()
+            except Exception:
+                print(f' {_GLD}>{_RST} ', end='', flush=True)
+                task = input().strip()
+
+            if not task:
+                continue
+
+            if task.lower() == '/provider':
+                provider_names  = list(self.providers.keys())
+                provider_labels = [self.providers[p]['label'] for p in provider_names]
+                provider_descs  = [self.providers[p]['desc']  for p in provider_names]
+                provider_idx = self.show_menu('Select Provider', provider_labels, provider_descs)
+                provider     = provider_names[provider_idx]
+                model        = self._pick_model(provider)
+                _save_config({'provider': provider, 'model': model})
+                continue
+
+            if task.lower() == '/model':
+                model = self._pick_model(provider)
+                _save_config({'provider': provider, 'model': model})
+                continue
+
+            if task.lower().startswith('/resume'):
+                follow_up = task[7:].strip()
+                self._pick_session(follow_up_task=follow_up)
+                return
+
+            self._save_history(provider, model, task)
+            _save_config({'provider': provider, 'model': model})
+            self._execute_agent(provider, model, task)
 
 
 if __name__ == '__main__':
@@ -659,12 +864,19 @@ if __name__ == '__main__':
     parser.add_argument('--provider', help='Provider: ollama, claude, anthropic, copilot')
     parser.add_argument('--model', help='Model name')
     parser.add_argument('--yes', '-y', action='store_true', help='Skip confirmations')
-    parser.add_argument('task', nargs='?', help='Task to execute')
+    parser.add_argument('task', nargs='?', help='Task to execute (starts immediately)')
 
     args = parser.parse_args()
     menu = MenuSystem()
 
-    if args.provider and args.model and args.task:
-        menu._direct_run(args.provider, args.model, args.task)
-    else:
-        menu.run()
+    # If provider/model specified, load them
+    if args.provider:
+        cfg = _load_config()
+        if args.provider in menu.providers:
+            cfg['provider'] = args.provider
+        if args.model:
+            cfg['model'] = args.model
+        _save_config(cfg)
+
+    # Run with initial task if provided (no prompt before TUI)
+    menu.run(initial_task=args.task)

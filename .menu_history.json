@@ -4,5 +4,47 @@
     "provider": "claude",
     "model": "opus",
     "task": "hi"
+  },
+  {
+    "timestamp": "2026-05-05T13:50:02.113119",
+    "provider": "ollama",
+    "model": "mistral:latest",
+    "task": "hi"
+  },
+  {
+    "timestamp": "2026-05-05T13:50:42.352955",
+    "provider": "ollama",
+    "model": "mistral:latest",
+    "task": "hi"
+  },
+  {
+    "timestamp": "2026-05-05T13:52:42.557526",
+    "provider": "ollama",
+    "model": "mistral:latest",
+    "task": "hi"
+  },
+  {
+    "timestamp": "2026-05-05T13:54:45.938684",
+    "provider": "ollama",
+    "model": "glm-5.1-cloud",
+    "task": "hi"
+  },
+  {
+    "timestamp": "2026-05-05T13:55:07.887217",
+    "provider": "ollama",
+    "model": "glm-5.1-cloud",
+    "task": "hello"
+  },
+  {
+    "timestamp": "2026-05-05T19:17:16.478134",
+    "provider": "ollama",
+    "model": "glm-5.1-cloud",
+    "task": "hello world"
+  },
+  {
+    "timestamp": "2026-05-05T19:22:20.284542",
+    "provider": "ollama",
+    "model": "glm-5.1-cloud",
+    "task": "test task"
   }
 ]

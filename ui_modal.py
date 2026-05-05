@@ -20,7 +20,7 @@ except ImportError:
     sys.exit(1)
 
 
-_ORG = '\033[38;5;208m'   # Claude Code orange
+_GLD = '\033[1;38;2;255;215;0m'   # #FFD700 gold (Hermes theme)
 _DIM = '\033[2m'
 _RST = '\033[0m'
 _BLD = '\033[1m'
@@ -31,8 +31,13 @@ class RichModalUI:
 
     def __init__(self):
         self.console = Console()
-        self.width = os.get_terminal_size().columns
-        self.height = os.get_terminal_size().lines
+        try:
+            self.width = os.get_terminal_size().columns
+            self.height = os.get_terminal_size().lines
+        except (OSError, PermissionError):
+            # Fallback for non-interactive environments
+            self.width = 200
+            self.height = 50
         self._setup_scroll_region()
 
     def _setup_scroll_region(self):
@@ -52,9 +57,9 @@ class RichModalUI:
 
         panel = Panel(
             content,
-            title=f' {_ORG}{title}{_RST} ',
+            title=f' {_GLD}{title}{_RST} ',
             expand=False,
-            border_style=f'color({_ORG})',
+            border_style=f'color({_GLD})',
         )
 
         # Center the panel
@@ -67,7 +72,7 @@ class RichModalUI:
         sys.stdout.flush()
 
         # Simple modal prompt
-        self.console.print(f'\n {_ORG}›{_RST} {prompt_text}', end='', highlight=False)
+        self.console.print(f'\n {_GLD}›{_RST} {prompt_text}', end='', highlight=False)
 
         try:
             return input().strip()
@@ -76,7 +81,7 @@ class RichModalUI:
 
     def show_status(self, mode: str, turn: int, tokens: int) -> None:
         """Display persistent status bar at bottom."""
-        mode_fmt = f'{_ORG}auto{_RST}' if mode == 'auto' else f'{_DIM}manual{_RST}'
+        mode_fmt = f'{_GLD}auto{_RST}' if mode == 'auto' else f'{_DIM}manual{_RST}'
         status_line = f'  {mode_fmt}  •  {turn}t  •  {tokens}🪙'
 
         # Position at bottom row using cursor control

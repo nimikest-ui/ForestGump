@@ -49,6 +49,13 @@ from pathlib import Path
 
 from skills import init_db as init_skills_db, skills_context, extract_skills_from_session, migrate_techniques_json, seed_bandit_skills
 
+try:
+    from rich.console import Console as _RichConsole
+    from rich.panel import Panel as _RichPanel
+    _RICH_AVAILABLE = True
+except ImportError:
+    _RICH_AVAILABLE = False
+
 SCRIPT_DIR = Path(__file__).parent.resolve()
 SESSIONS_DIR = SCRIPT_DIR / 'sessions'
 MEMORY_FILE = SCRIPT_DIR / 'memory.json'
@@ -63,7 +70,9 @@ _BLD = '\033[1m' if _USE_COLOR else ''
 _GRN = '\033[32m' if _USE_COLOR else ''
 _RED = '\033[31m' if _USE_COLOR else ''
 _YLW = '\033[33m' if _USE_COLOR else ''
-_ORG = '\033[38;5;208m' if _USE_COLOR else ''
+_GLD = '\033[1;38;2;255;215;0m' if _USE_COLOR else ''  # #FFD700 gold (Hermes theme)
+_AMB = '\033[38;2;255;191;0m' if _USE_COLOR else ''   # #FFBF00 amber
+_BRZ = '\033[38;2;205;127;50m' if _USE_COLOR else ''  # #CD7F32 bronze
 
 
 def print_finding(title, content):
@@ -104,7 +113,7 @@ def _bar_render():
     start = _bar_state['session_start_time']
     remaining = _bar_state['tokens_remaining']
 
-    mode_fmt = f'{_ORG}auto{_RST}' if mode == 'auto' else f'{_DIM}manual{_RST}'
+    mode_fmt = f'{_GLD}auto{_RST}' if mode == 'auto' else f'{_DIM}manual{_RST}'
     turn_fmt = f'{_DIM}turn {turn}{_RST}' if turn else ''
     tok_fmt  = f'{_DIM}{tok:,} tok{_RST}'
 
@@ -167,7 +176,10 @@ def _bar_update(**kwargs):
 
 
 class Spinner:
-    _FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+    _FRAMES = ['(⚔)', '(⛨)', '(▲)', '(<>)', '(/)', '(✗)', '(⌁)', '(≈)']
+    _VERBS  = ['scanning', 'probing', 'targeting', 'mapping', 'exploiting',
+               'enumerating', 'intercepting', 'analyzing', 'pivoting', 'escalating']
+    _WINGS  = [('⟪⚔ ', ' ⚔⟫'), ('⟪▲ ', ' ▲⟫'), ('⟪⛨ ', ' ⛨⟫')]
 
     def __init__(self, msg='Thinking'):
         self._msg = msg
@@ -192,8 +204,10 @@ class Spinner:
         i = 0
         while not self._stop.is_set():
             elapsed = time.time() - self._t0
-            frame   = self._FRAMES[i % len(self._FRAMES)]
-            line    = f'\r  {_ORG}{frame}{_RST} {self._msg} for {elapsed:.1f}s…'
+            frame = self._FRAMES[i % len(self._FRAMES)]
+            wing_l, wing_r = self._WINGS[(i // 4) % len(self._WINGS)]
+            verb = self._VERBS[(i // 6) % len(self._VERBS)]
+            line = f'\r {_GLD}{wing_l}{frame}{wing_r}{_RST} {verb}… {elapsed:.1f}s'
             sys.stdout.write(line)
             sys.stdout.flush()
             i += 1
@@ -1405,12 +1419,30 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
     # Trigger periodic self-review every random 3-6 turns.
     next_review_turn = random.randint(3, 6)
 
-    print(f'\n {_ORG}●{_RST} {_BLD}Agent{_RST}  {provider.name}')
+    # Startup header with Hermes-style Rich Panel
     task_preview = task[:80] + ('…' if len(task) > 80 else '')
-    print(f'  {_DIM}Task   {_RST}{task_preview}')
+    mem_summary = ''
     if mem.get('networks') or mem.get('credentials'):
-        print(f'  {_DIM}Memory {_RST}{len(mem.get("networks", {}))} networks, {len(mem.get("credentials", {}))} creds')
-    print()
+        mem_summary = f"  {len(mem.get('networks', {}))} networks, {len(mem.get('credentials', {}))} creds"
+
+    if _RICH_AVAILABLE:
+        _rc = _RichConsole()
+        body = f"[dim]Task[/dim]  {task_preview}"
+        if mem_summary:
+            body += f"\n[dim]Memory[/dim]{mem_summary}"
+        _rc.print(_RichPanel(
+            body,
+            title=f"[bold #FFD700]⚕ Forest Gump[/bold #FFD700] [dim]{provider.name}[/dim]",
+            border_style="#CD7F32",
+            padding=(0, 1),
+        ))
+    else:
+        # Fallback for no Rich
+        print(f'\n {_GLD}⚕{_RST} {_BLD}Forest Gump{_RST}  {provider.name}')
+        print(f'  {_DIM}Task   {_RST}{task_preview}')
+        if mem_summary:
+            print(f'  {_DIM}Memory {_RST}{mem_summary}')
+        print()
 
     # Start persistent bottom bar
     _bar_state['mode'] = 'auto' if not confirm else 'manual'
@@ -1515,7 +1547,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
                 tok_str = f" | {'/'.join(tok_parts)} tok"
             else:
                 tok_str = ''
-            print(f'\n🤖 Agent: [llm={llm_inference}s{tok_str}]\n{response}')
+            print(f'\n{_GLD}⚕ Agent:{_RST} [llm={llm_inference}s{tok_str}]\n{response}')
 
             # Display running token dashboard
             if usage:
@@ -1641,7 +1673,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
                     continue
             elif confirm:
                 # ── Normal human gate ──
-                print(f'\n {_ORG}⏺{_RST} bash ({cmd})')
+                print(f'\n {_GLD}⚔{_RST} bash ({cmd})')
                 _confirmed_display = True
                 options = [('↵', 'run'), ('s', 'skip'), ('t', 'steer'), ('q', 'quit'), ('a', 'auto')]
                 choice = ui.show_command_prompt(cmd, options).strip().lower()
@@ -1738,9 +1770,9 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
 
             # ── Execute ──
             cmd_preview = cmd[:60] + ('…' if len(cmd) > 60 else '')
-            _bar_update(action=f'{_ORG}⏺{_RST} bash ({cmd_preview})')
+            _bar_update(action=f'{_GLD}⚔{_RST} bash ({cmd_preview})')
             if not _confirmed_display:
-                print(f'\n {_ORG}⏺{_RST} bash ({cmd})')
+                print(f'\n {_GLD}⚔{_RST} bash ({cmd})')
                 # Auto mode: brief 1.5s window to steer before executing
                 if not confirm and sys.stdin.isatty():
                     ch = ui.show_steer_window(timeout_s=1.5)
