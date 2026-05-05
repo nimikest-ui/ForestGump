@@ -1,6 +1,6 @@
-"""UI module for ForestGump with menu system and colors."""
+"""UI module for terminal interactions and menu system."""
 
-from src.forestgump.ui.menu import MenuSystem
-from src.forestgump.ui import colors
+from forestgump.ui.menu import MenuSystem
+from forestgump.ui import colors
 
 __all__ = ["MenuSystem", "colors"]

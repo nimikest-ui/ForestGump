@@ -1,7 +1,7 @@
 """Terminal UI menu system with arrow key navigation and command history."""
 
 from typing import List
-from src.forestgump.ui.colors import GREEN, RESET, BOLD, colorize
+from forestgump.ui.colors import GREEN, RESET, BOLD, colorize
 
 
 class MenuSystem:
