@@ -16,6 +16,7 @@ class MemorySystem:
         
         Args:
             memory_file: Optional path to memory file. If None, uses ~/.forestgump/memory.json
+        
         """
         if memory_file is None:
             memory_file = Path.home() / ".forestgump" / "memory.json"

@@ -1,0 +1,25 @@
+{
+  "task": "hello",
+  "provider": "copilot/claude-haiku-4.5-20251001",
+  "turns": 1,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Task: hello\n\nSend ONE command. Get output. Repeat."
+    }
+  ],
+  "log": [],
+  "memory": {
+    "facts": [],
+    "networks": {},
+    "credentials": {},
+    "notes": []
+  },
+  "token_totals": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  },
+  "timestamp": "20260505_143936"
+}

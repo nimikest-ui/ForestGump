@@ -1,0 +1,26 @@
+{
+  "task": "hi",
+  "provider": "claude-cli/haiku",
+  "turns": 1,
+  "messages": [
+    {
+      "role": "user",
+      "content": "PREVIOUS SESSION SUMMARY:\n- Prior task: hi\n- Turns completed: 1 (do NOT infer progress or level from turn count)\n- Important: the shell is fresh. Do not assume any previous shell state, temporary files, or environment variables still exist.\n- Use the prior session as reference only and continue with one new command.\n- Do NOT assume what level/stage was reached \u2014 infer only from the commands and output shown below.\n\nNow continue from this fresh shell, using the above as reference. Do not repeat old commands unless they are still clearly relevant."
+    }
+  ],
+  "log": [],
+  "memory": {
+    "facts": [],
+    "networks": {},
+    "credentials": {},
+    "notes": [],
+    "_migrated_techniques": true
+  },
+  "token_totals": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  },
+  "timestamp": "20260505_200901"
+}

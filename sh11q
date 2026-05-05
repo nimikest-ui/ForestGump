@@ -1,0 +1,182 @@
+[4mSSH-AGENT[24m(1)                  General Commands Manual                [4mSSH-AGENT[24m(1)
+
+[1mNAME[0m
+       ssh-agent — OpenSSH authentication agent
+
+[1mSYNOPSIS[0m
+       [1mssh-agent  [22m[[1m-c  [22m|  [1m-s[22m]  [[1m-DdTU[22m]  [[1m-a  [4m[22mbind_address[24m]  [[1m-E [4m[22mfingerprint_hash[24m]
+                 [[1m-O [4m[22moption[24m] [[1m-P [4m[22mallowed_providers[24m] [[1m-t [4m[22mlife[24m]
+       [1mssh-agent  [22m[[1m-TU[22m]  [[1m-a  [4m[22mbind_address[24m]  [[1m-E  [4m[22mfingerprint_hash[24m]  [[1m-O  [4m[22moption[24m]
+                 [[1m-P [4m[22mallowed_providers[24m] [[1m-t [4m[22mlife[24m] [4mcommand[24m [[4marg[24m [4m...[24m]
+       [1mssh-agent [22m[[1m-c [22m| [1m-s[22m] [1m-k[0m
+       [1mssh-agent -u[0m
+
+[1mDESCRIPTION[0m
+       [1mssh-agent  [22mis a program to hold private keys used for public key authenti‐
+       cation.  Through use of environment variables the agent can be located and
+       automatically used for authentication when logging in  to  other  machines
+       using [4mssh[24m(1).
+
+       The options are as follows:
+
+       [1m-a [4m[22mbind_address[0m
+               Bind  the  agent  to the Unix-domain socket [4mbind_address[24m.  The de‐
+               fault  is  to  create  a  socket  at  a   random   path   matching
+               [4m$HOME/.ssh/agent/s.*[24m.
+
+       [1m-c      [22mGenerate C-shell commands on standard output.  This is the default
+               if SHELL looks like it's a csh style of shell.
+
+       [1m-D      [22mForeground  mode.   When  this option is specified, [1mssh-agent [22mwill
+               not fork.
+
+       [1m-d      [22mDebug mode.  When this option is  specified,  [1mssh-agent  [22mwill  not
+               fork and will write debug information to standard error.
+
+       [1m-E [4m[22mfingerprint_hash[0m
+               Specifies  the  hash  algorithm  used  when displaying key finger‐
+               prints.  Valid options are: “md5” and “sha256”.   The  default  is
+               “sha256”.
+
+       [1m-k      [22mKill  the  current  agent  (given by the SSH_AGENT_PID environment
+               variable).
+
+       [1m-O [4m[22moption[0m
+               Specify an option when starting [1mssh-agent[22m.  The supported  options
+               are: [1mallow-remote-pkcs11[22m, [1mno-restrict-websafe [22mand [1mwebsafe-allow[22m.
+
+               The  [1mallow-remote-pkcs11  [22moption  allows  clients  of  a forwarded
+               [1mssh-agent [22mto load PKCS#11 or FIDO provider libraries.  By  default
+               only  local  clients  may  perform this operation.  Note that sig‐
+               nalling that an [1mssh-agent [22mclient is remote is performed by [4mssh[24m(1),
+               and use of other tools to forward access to the agent  socket  may
+               circumvent this restriction.
+
+               The  [1mno-restrict-websafe [22moption instructs [1mssh-agent [22mto permit sig‐
+               natures using FIDO keys that might be web authentication requests.
+               By default, [1mssh-agent [22mrefuses signature  requests  for  FIDO  keys
+               where  the  key  application string does not start with “ssh:” and
+               when the data to be signed does not appear to be  an  [4mssh[24m(1)  user
+               authentication request or an [4mssh-keygen[24m(1) signature.  The default
+               behaviour  prevents  forwarded  access to a FIDO key from also im‐
+               plicitly forwarding the ability to authenticate to websites.
+
+               Alternately the [1mwebsafe-allow [22moption allows specifying a  pattern-
+               list of key application strings to replace the default application
+               allow-list,                      for                      example:
+               “websafe-allow=ssh:*,example.org,*.example.com”
+
+               See PATTERNS in [4mssh_config[24m(5) for a  description  of  pattern-list
+               syntax.
+
+       [1m-P [4m[22mallowed_providers[0m
+               Specify  a  pattern-list  of acceptable paths for PKCS#11 provider
+               and FIDO authenticator middleware shared  libraries  that  may  be
+               used  with  the [1m-S [22mor [1m-s [22moptions to [4mssh-add[24m(1).  Libraries that do
+               not match the pattern list will be refused.  The default  list  is
+               “usr/lib*/*,/usr/local/lib*/*”.
+
+               See  PATTERNS  in  [4mssh_config[24m(5) for a description of pattern-list
+               syntax.
+
+       [1m-s      [22mGenerate Bourne shell commands on standard output.   This  is  the
+               default if SHELL does not look like it's a csh style of shell.
+
+       [1m-T      [22mBind  the  agent  socket  in a randomised subdirectory of the form
+               [4m$TMPDIR/ssh-XXXXXXXXXX/agent.<ppid>[24m, instead of the default behav‐
+               iour of using a randomised name matching [4m$HOME/.ssh/agent/s.*[24m.
+
+       [1m-t [4m[22mlife[0m
+               Set a default value for the maximum lifetime of  identities  added
+               to  the  agent.   The lifetime may be specified in seconds or in a
+               time format specified in [4msshd_config[24m(5).  A lifetime specified for
+               an identity with [4mssh-add[24m(1) overrides this  value.   Without  this
+               option the default maximum lifetime is forever.
+
+       [1m-U      [22mInstructs  [1mssh-agent  [22mnot  to  clean  up stale agent sockets under
+               [4m$HOME/.ssh/agent/[24m.
+
+       [1m-u      [22mInstructs [1mssh-agent [22mto only clean up  stale  agent  sockets  under
+               [4m$HOME/.ssh/agent/[24m  and  then  exit immediately.  If this option is
+               given twice, [1mssh-agent [22mwill delete stale agent sockets  regardless
+               of the host name that created them.
+
+       [4mcommand[24m [[4marg[24m [4m...[24m]
+               If  a  command (and optional arguments) is given, this is executed
+               as a subprocess of the agent.  The agent exits automatically  when
+               the command given on the command line terminates.
+
+       There  are  three  main  ways to get an agent set up.  The first is at the
+       start of an X session, where all other windows or programs are started  as
+       children of the [1mssh-agent [22mprogram.  The agent starts a command under which
+       its  environment  variables  are  exported, for example [1mssh-agent xterm &[22m.
+       When the command terminates, so does the agent.
+
+       The second method is used for a login session.  When [1mssh-agent [22mis started,
+       it prints the shell commands required to set  its  environment  variables,
+       which  in  turn  can  be  evaluated in the calling shell, for example [1meval[0m
+       [1m`ssh-agent -s`[22m.
+
+       In both of these cases, [4mssh[24m(1) looks at these  environment  variables  and
+       uses them to establish a connection to the agent.
+
+       The third way to run [1mssh-agent [22mis via socket activation from a supervising
+       process,  such  as systemd.  In this mode, the supervising process creates
+       the listening socket and is responsible for starting [1mssh-agent [22mas  needed,
+       and  also  for  communicating the location of the socket listener to other
+       programs in the user's session.  Socket activation is used when  [1mssh-agent[0m
+       is  started with either of the [1m-d [22mor [1m-D [22mflags, no socket listening address
+       specified by the [1m-a [22mflag, and both the LISTEN_FDS and LISTEN_PID  environ‐
+       ment variables correctly supplied by the supervising process.
+
+       The  agent initially does not have any private keys.  Keys are added using
+       [4mssh-add[24m(1) or by [4mssh[24m(1) when [1mAddKeysToAgent [22mis set in [4mssh_config[24m(5).  Mul‐
+       tiple identities may be stored in [1mssh-agent [22mconcurrently and  [4mssh[24m(1)  will
+       automatically use them if present.  [4mssh-add[24m(1) is also used to remove keys
+       from [1mssh-agent [22mand to query the keys that are held in one.
+
+       Connections  to [1mssh-agent [22mmay be forwarded from further remote hosts using
+       the [1m-A [22moption to [4mssh[24m(1) (but see the caveats documented therein), avoiding
+       the need for authentication data to be stored on other machines.   Authen‐
+       tication  passphrases and private keys never go over the network: the con‐
+       nection to the agent is forwarded over SSH remote connections and the  re‐
+       sult is returned to the requester, allowing the user access to their iden‐
+       tities anywhere in the network in a secure fashion.
+
+       [1mssh-agent [22mwill delete all keys it has loaded upon receiving SIGUSR1.
+
+[1mENVIRONMENT[0m
+       SSH_AGENT_PID  When  [1mssh-agent  [22mstarts,  it stores the name of the agent's
+                      process ID (PID) in this variable.
+
+       SSH_AUTH_SOCK  When [1mssh-agent [22mstarts, it creates a Unix-domain socket  and
+                      stores  its  pathname  in  this variable.  It is accessible
+                      only to the current user, but is easily abused by  root  or
+                      another instance of the same user.
+
+       In  Debian,  [1mssh-agent [22mis installed with the set-group-id bit set, to pre‐
+       vent [4mptrace[24m(2) attacks retrieving private  key  material.   This  has  the
+       side-effect  of  causing the run-time linker to remove certain environment
+       variables which might have security implications for set-id programs,  in‐
+       cluding  LD_PRELOAD,  LD_LIBRARY_PATH, and TMPDIR.  If you need to set any
+       of these environment variables, you will need to do so in the program exe‐
+       cuted by ssh-agent.
+
+[1mFILES[0m
+       [4m$HOME/.ssh/agent/s.*[0m
+               Unix-domain sockets used to contain the connection to the  authen‐
+               tication  agent.   These  sockets  should  only be readable by the
+               owner.  The sockets should  get  automatically  removed  when  the
+               agent exits.
+
+[1mSEE ALSO[0m
+       [4mssh[24m(1), [4mssh-add[24m(1), [4mssh-keygen[24m(1), [4mssh_config[24m(5), [4msshd[24m(8)
+
+[1mAUTHORS[0m
+       OpenSSH  is  a  derivative  of the original and free ssh 1.2.12 release by
+       Tatu Ylonen.  Aaron Campbell, Bob Beck, Markus Friedl, Niels Provos,  Theo
+       de  Raadt and Dug Song removed many bugs, re-added newer features and cre‐
+       ated OpenSSH.  Markus Friedl contributed the support for SSH protocol ver‐
+       sions 1.5 and 2.0.
+
+Debian                           October 4, 2025                     [4mSSH-AGENT[24m(1)

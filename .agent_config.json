@@ -1,4 +1,4 @@
 {
-  "provider": "ollama",
-  "model": "glm-5.1-cloud"
+  "provider": "copilot",
+  "model": "claude-haiku-4.5"
 }

@@ -1,0 +1,41 @@
+{
+  "task": "hi",
+  "provider": "ollama/nemotron-3-super:cloud",
+  "turns": 1,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Task: hi\n\nSend ONE command. Get output. Repeat."
+    },
+    {
+      "role": "assistant",
+      "content": "<cmd>ls -la</cmd>"
+    }
+  ],
+  "log": [
+    {
+      "turn": 1,
+      "type": "thought",
+      "content": "<cmd>ls -la</cmd>",
+      "tokens": {
+        "input_tokens": 455,
+        "output_tokens": 148
+      },
+      "ts": 1777990391.4267824,
+      "llm_s": 1.1
+    }
+  ],
+  "memory": {
+    "facts": [],
+    "networks": {},
+    "credentials": {},
+    "notes": []
+  },
+  "token_totals": {
+    "input_tokens": 455,
+    "output_tokens": 148,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  },
+  "timestamp": "20260505_141315"
+}

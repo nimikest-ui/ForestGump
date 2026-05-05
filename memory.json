@@ -2,5 +2,6 @@
   "facts": [],
   "networks": {},
   "credentials": {},
-  "notes": []
+  "notes": [],
+  "_migrated_techniques": true
 }

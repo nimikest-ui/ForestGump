@@ -1,0 +1,26 @@
+{
+  "task": "hi",
+  "provider": "claude-cli/haiku",
+  "turns": 1,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Task: hi\n\nSend ONE command. Get output. Repeat."
+    }
+  ],
+  "log": [],
+  "memory": {
+    "facts": [],
+    "networks": {},
+    "credentials": {},
+    "notes": [],
+    "_migrated_techniques": true
+  },
+  "token_totals": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  },
+  "timestamp": "20260505_194957"
+}
