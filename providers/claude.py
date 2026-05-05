@@ -61,7 +61,7 @@ class ClaudeCliProvider(Provider):
         
         try:
             result = subprocess.run(
-                ["claude", "-p", prompt, "--json"],
+                ["claude", "-p", prompt],
                 capture_output=True,
                 timeout=30,
                 text=True,
@@ -70,18 +70,8 @@ class ClaudeCliProvider(Provider):
             if result.returncode != 0:
                 raise RuntimeError(f"Claude CLI error: {result.stderr}")
             
-            # Parse JSON response
-            try:
-                response_data = json.loads(result.stdout)
-                if isinstance(response_data, dict) and "content" in response_data:
-                    return response_data["content"].strip()
-                elif isinstance(response_data, dict) and "response" in response_data:
-                    return response_data["response"].strip()
-                else:
-                    return result.stdout.strip()
-            except json.JSONDecodeError:
-                # Fall back to raw output if not JSON
-                return result.stdout.strip()
+            # Return the raw text output (Claude -p flag returns plain text)
+            return result.stdout.strip()
         
         except subprocess.TimeoutExpired:
             raise RuntimeError("Claude CLI request timed out")
