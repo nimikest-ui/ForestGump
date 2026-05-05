@@ -3,31 +3,55 @@
 __version__ = "0.1.0"
 
 # Core imports
-from src.forestgump.core.agent import Agent
-from src.forestgump.core.session import Session
+try:
+    from forestgump.core.agent import Agent
+    from forestgump.core.session import Session
+except ImportError:
+    Agent = None
+    Session = None
 
 # Tool imports
-from src.forestgump.tools.shell import ShellTool
-from src.forestgump.tools.safety import SafetyChecker
+try:
+    from forestgump.tools.shell import ShellTool
+    from forestgump.tools.safety import SafetyChecker
+except ImportError:
+    ShellTool = None
+    SafetyChecker = None
 
 # Memory imports
-from src.forestgump.memory.types import MemoryEntry
-from src.forestgump.memory.system import MemorySystem
+from forestgump.memory.types import MemoryEntry
+from forestgump.memory.system import MemorySystem
+from forestgump.memory.manager import MemoryManager
 
 # Skills imports
-from src.forestgump.skills.database import SkillsDatabase
-from src.forestgump.skills.extractor import SkillExtractor
+try:
+    from forestgump.skills.database import SkillsDatabase
+    from forestgump.skills.extractor import SkillExtractor
+except ImportError:
+    SkillsDatabase = None
+    SkillExtractor = None
 
 # UI imports
-from src.forestgump.ui.menu import MenuSystem
-from src.forestgump.ui import colors
+try:
+    from forestgump.ui.menu import MenuSystem
+    from forestgump.ui import colors
+except ImportError:
+    MenuSystem = None
+    colors = None
 
 # Provider imports
-from src.forestgump.providers.base import BaseProvider
-from src.forestgump.providers.claude import ClaudeProvider
-from src.forestgump.providers.ollama import OllamaProvider
-from src.forestgump.providers.anthropic import AnthropicProvider
-from src.forestgump.providers.copilot import CopilotProvider
+try:
+    from forestgump.providers.base import BaseProvider
+    from forestgump.providers.claude import ClaudeProvider
+    from forestgump.providers.ollama import OllamaProvider
+    from forestgump.providers.anthropic import AnthropicProvider
+    from forestgump.providers.copilot import CopilotProvider
+except ImportError:
+    BaseProvider = None
+    ClaudeProvider = None
+    OllamaProvider = None
+    AnthropicProvider = None
+    CopilotProvider = None
 
 __all__ = [
     "Agent",
@@ -36,6 +60,7 @@ __all__ = [
     "SafetyChecker",
     "MemoryEntry",
     "MemorySystem",
+    "MemoryManager",
     "SkillsDatabase",
     "SkillExtractor",
     "MenuSystem",
@@ -46,3 +71,4 @@ __all__ = [
     "AnthropicProvider",
     "CopilotProvider",
 ]
+

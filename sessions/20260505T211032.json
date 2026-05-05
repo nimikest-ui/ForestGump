@@ -1,0 +1,9 @@
+{
+  "session_id": "20260505T211032",
+  "task": "test",
+  "provider": "groq",
+  "model": "llama-3.1-8b-instant",
+  "created_at": "2026-05-05T21:10:32.395926",
+  "messages": [],
+  "session_state": "active"
+}

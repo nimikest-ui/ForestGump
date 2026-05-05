@@ -1,0 +1,9 @@
+{
+  "session_id": "20260505T211356",
+  "task": "test query",
+  "provider": "groq",
+  "model": "groq-unavailable",
+  "timestamp": "2026-05-05T21:13:56.049125",
+  "messages": [],
+  "state": "active"
+}

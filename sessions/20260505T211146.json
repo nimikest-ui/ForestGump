@@ -1,0 +1,9 @@
+{
+  "session_id": "20260505T211146",
+  "task": "test",
+  "provider": "groq",
+  "model": "llama-3.3-70b-versatile",
+  "created_at": "2026-05-05T21:11:46.167294",
+  "messages": [],
+  "session_state": "active"
+}

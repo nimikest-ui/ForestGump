@@ -13,6 +13,14 @@ from pathlib import Path
 from typing import Optional, Dict, List, Any
 import subprocess
 
+# Import providers
+from providers import (
+    GroqProvider,
+    ClaudeCliProvider,
+    AnthropicProvider,
+    CopilotProvider,
+)
+
 # ANSI colors
 CYAN = "\033[96m"
 GREEN = "\033[92m"
@@ -161,6 +169,27 @@ class ProviderManager:
             return True
         except Exception:
             return False
+    
+    def create_provider(self, provider_name: str):
+        """Create and return a provider instance by name."""
+        try:
+            if provider_name == "groq":
+                return GroqProvider()
+            elif provider_name == "claude":
+                return ClaudeCliProvider()
+            elif provider_name == "anthropic":
+                return AnthropicProvider()
+            elif provider_name == "copilot":
+                return CopilotProvider()
+            else:
+                print(f"{Colors.error('[!]')} Unknown provider: {provider_name}")
+                return None
+        except RuntimeError as e:
+            print(f"{Colors.error('[!]')} Provider initialization failed: {e}")
+            return None
+        except Exception as e:
+            print(f"{Colors.error('[!]')} Unexpected error creating provider: {e}")
+            return None
 
 
 class SessionManager:
@@ -242,6 +271,318 @@ class SessionManager:
             return False
 
 
+class InteractiveREPL:
+    """Interactive REPL for ForestGump chat sessions."""
+    
+    def __init__(self, provider, model: str, provider_name: str, session_dir: Path = None, session_id: str = None):
+        """
+        Initialize the interactive REPL.
+        
+        Args:
+            provider: The LLM provider instance
+            model: Model name/identifier
+            provider_name: Provider name (groq, claude, etc.)
+            session_dir: Directory for session storage
+            session_id: Optional existing session ID to resume
+        """
+        self.provider = provider
+        self.model = model
+        self.provider_name = provider_name
+        self.session_dir = session_dir or Path.home() / ".forestgump" / "sessions"
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.session_id = session_id or None
+        self.conversation_history = []
+        self.task_description = ""
+        
+        # Load existing session if provided
+        if session_id:
+            self._load_session(session_id)
+    
+    def _load_session(self, session_id: str):
+        """Load conversation history from existing session."""
+        session_file = self.session_dir / f"{session_id}.json"
+        if not session_file.exists():
+            return
+        
+        try:
+            with open(session_file) as f:
+                session_data = json.load(f)
+                self.conversation_history = session_data.get("messages", [])
+                self.task_description = session_data.get("task", "")
+        except Exception as e:
+            print(f"{Colors.error('[!]')} Failed to load session: {e}")
+    
+    def parse_command(self, input_text: str) -> tuple:
+        """
+        Parse input to identify commands.
+        
+        Returns:
+            (command, args) tuple, or (None, None) for regular messages
+        """
+        input_text = input_text.strip()
+        if not input_text or not input_text.startswith("/"):
+            return None, None
+        
+        parts = input_text[1:].split(maxsplit=1)
+        command = parts[0].lower()
+        args = parts[1].split() if len(parts) > 1 else []
+        
+        return command, args
+    
+    def handle_help(self, args: List[str]):
+        """Display help for available commands."""
+        help_text = f"""
+{Colors.info('ForestGump Interactive Chat - Commands:')}
+
+  /help              Show this help message
+  /status            Show current configuration
+  /clear             Clear conversation history
+  /save              Save current session
+  /sessions          List recent sessions
+  /load <session_id> Load a previous session
+  /exit or Ctrl+D    Save and exit
+
+Type regular messages to chat. Messages are automatically saved after each turn.
+"""
+        print(help_text)
+    
+    def handle_status(self, args: List[str]):
+        """Display current REPL status."""
+        turn_count = self.get_turn_count()
+        max_turns = 50
+        
+        print(f"""
+{Colors.info('Current Configuration:')}
+  Provider: {self.provider_name}
+  Model: {self.model}
+  Session: {self.session_id or 'new'}
+  Turn: {turn_count}/{max_turns}
+  Messages: {len(self.conversation_history)}
+""")
+    
+    def handle_clear(self, args: List[str]):
+        """Clear conversation history."""
+        self.conversation_history = []
+        print(f"{Colors.success('[+]')} Conversation cleared.")
+    
+    def handle_save(self, args: List[str]):
+        """Save current session."""
+        session_id = self.save_session()
+        print(f"{Colors.success('[+]')} Session saved: {session_id}")
+    
+    def handle_sessions(self, args: List[str]):
+        """List recent sessions."""
+        sessions = self.list_sessions(limit=10)
+        if not sessions:
+            print(f"{Colors.warning('[!]')} No sessions found.\n")
+            return
+        
+        print(f"\n{Colors.info('Recent Sessions:')}")
+        for session in sessions:
+            session_id = session.get("id") or "unknown"
+            task = (session.get("task") or "unknown")[:40]
+            print(f"  {session_id:<20} | {task}")
+        print()
+    
+    def handle_load(self, args: List[str]):
+        """Load a previous session."""
+        if not args:
+            print(f"{Colors.error('[!]')} Usage: /load <session_id>\n")
+            return False
+        
+        session_id = args[0]
+        session_file = self.session_dir / f"{session_id}.json"
+        
+        if not session_file.exists():
+            print(f"{Colors.error('[!]')} Session not found: {session_id}\n")
+            return False
+        
+        self._load_session(session_id)
+        self.session_id = session_id
+        print(f"{Colors.success('[+]')} Loaded session: {session_id}")
+        print(f"  Messages: {len(self.conversation_history)}")
+        print()
+        return True
+    
+    def handle_exit(self, args: List[str]) -> bool:
+        """Handle exit command."""
+        if self.conversation_history:
+            self.save_session()
+            print(f"{Colors.success('[+]')} Session saved before exit.")
+        print(f"{Colors.info('[*]')} Exiting ForestGump.\n")
+        return True
+    
+    def append_message(self, role: str, content: str):
+        """Append a message to conversation history."""
+        self.conversation_history.append({
+            "role": role,
+            "content": content
+        })
+    
+    def save_session(self) -> str:
+        """Save current session to disk."""
+        if not self.session_id:
+            self.session_id = datetime.now().strftime("%Y%m%dT%H%M%S")
+        
+        session_file = self.session_dir / f"{self.session_id}.json"
+        session_data = {
+            "session_id": self.session_id,
+            "task": self.task_description,
+            "provider": self.provider_name,
+            "model": self.model,
+            "timestamp": datetime.now().isoformat(),
+            "messages": self.conversation_history,
+            "state": "active"
+        }
+        
+        try:
+            with open(session_file, "w") as f:
+                json.dump(session_data, f, indent=2)
+            return self.session_id
+        except Exception as e:
+            print(f"{Colors.error('[!]')} Failed to save session: {e}")
+            return ""
+    
+    def list_sessions(self, limit: int = 10) -> List[Dict[str, str]]:
+        """List recent sessions."""
+        sessions = []
+        try:
+            session_files = sorted(self.session_dir.glob("*.json"), reverse=True)[:limit]
+            for session_file in session_files:
+                try:
+                    with open(session_file) as f:
+                        session = json.load(f)
+                        sessions.append({
+                            "id": session.get("session_id", "unknown"),
+                            "task": session.get("task", "Untitled"),
+                            "provider": session.get("provider", "unknown"),
+                            "timestamp": session.get("timestamp", "unknown"),
+                        })
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"{Colors.error('[!]')} Failed to list sessions: {e}")
+        
+        return sessions
+    
+    def get_turn_count(self) -> int:
+        """Get the number of complete turns (user-assistant pairs)."""
+        # Count pairs where we have both user and assistant messages
+        pairs = 0
+        for i in range(0, len(self.conversation_history) - 1, 2):
+            if (i + 1 < len(self.conversation_history) and 
+                self.conversation_history[i].get("role") == "user" and
+                self.conversation_history[i + 1].get("role") == "assistant"):
+                pairs += 1
+        return pairs
+    
+    def format_user_message(self, content: str) -> str:
+        """Format user message with color."""
+        return f"{CYAN}You: {content}{RESET}"
+    
+    def format_assistant_message(self, content: str) -> str:
+        """Format assistant message with color."""
+        return f"{GREEN}Assistant: {content}{RESET}"
+    
+    def format_error_message(self, content: str) -> str:
+        """Format error message with color."""
+        return f"{RED}Error: {content}{RESET}"
+    
+    def print_welcome(self):
+        """Print welcome banner."""
+        print(f"\n{Colors.info('╔════════════════════════════════════════╗')}")
+        print(f"{Colors.info('║  ForestGump Interactive Chat            ║')}")
+        print(f"{Colors.info('║  Provider: ' + self.provider_name + ' ' * (30 - len(self.provider_name)) + '║')}")
+        print(f"{Colors.info('║  Model: ' + self.model + ' ' * (32 - len(self.model)) + '║')}")
+        print(f"{Colors.info('╚════════════════════════════════════════╝')}\n")
+        
+        if self.session_id:
+            turn_count = self.get_turn_count()
+            print(f"{Colors.info('[*]')} Resumed session: {self.session_id} (Turn {turn_count})\n")
+        
+        print(f"{Colors.warning('[?]')} Type /help for commands or Ctrl+D to exit.\n")
+    
+    def print_prompt(self) -> str:
+        """Print the input prompt and return the user input."""
+        try:
+            model_short = self.model.split("/")[-1][:20]
+            prompt = f"{Colors.info(model_short)}> {RESET}"
+            return input(prompt).strip()
+        except (KeyboardInterrupt, EOFError):
+            # Ctrl+C or Ctrl+D
+            return "/exit"
+    
+    def run(self):
+        """Main REPL loop."""
+        self.print_welcome()
+        
+        while True:
+            try:
+                user_input = self.print_prompt()
+                
+                if not user_input:
+                    continue
+                
+                # Parse command or regular message
+                command, args = self.parse_command(user_input)
+                
+                if command:
+                    # Handle special commands
+                    if command == "help":
+                        self.handle_help(args)
+                    elif command == "status":
+                        self.handle_status(args)
+                    elif command == "clear":
+                        self.handle_clear(args)
+                    elif command == "save":
+                        self.handle_save(args)
+                    elif command == "sessions":
+                        self.handle_sessions(args)
+                    elif command == "load":
+                        self.handle_load(args)
+                    elif command == "exit":
+                        if self.handle_exit(args):
+                            break
+                    else:
+                        print(f"{Colors.error('[!]')} Unknown command: /{command}")
+                        print(f"{Colors.info('[?]')} Type /help for available commands.\n")
+                else:
+                    # Regular message - send to provider
+                    self.append_message("user", user_input)
+                    print(self.format_user_message(user_input))
+                    
+                    # Get response from provider
+                    try:
+                        print(f"{Colors.warning('[*]')} Thinking...", end="", flush=True)
+                        
+                        # Call provider's chat method with full history
+                        response = self.provider.chat(user_input, self.conversation_history)
+                        
+                        print("\r", end="")  # Clear the "Thinking..." line
+                        print(self.format_assistant_message(response))
+                        print()
+                        
+                        # Add response to history
+                        self.append_message("assistant", response)
+                        
+                        # Auto-save after each turn
+                        self.save_session()
+                        
+                    except Exception as e:
+                        print("\r", end="")  # Clear the "Thinking..." line
+                        error_msg = f"Provider error: {str(e)}"
+                        print(self.format_error_message(error_msg))
+                        print()
+                        
+            except KeyboardInterrupt:
+                print(f"\n{Colors.warning('[!]')} Interrupted. Use /exit to save and quit.\n")
+            except EOFError:
+                # Ctrl+D
+                if self.handle_exit([]):
+                    break
+
+
 class ForestGumpCLI:
     """Main ForestGump CLI interface (Hermes-compatible)."""
     
@@ -251,7 +592,13 @@ class ForestGumpCLI:
         self.models = ModelDiscovery()
     
     def chat(self, args):
-        """Start a chat session."""
+        """Start a chat session with memory context injection."""
+        # Try to import MemoryManager if available
+        try:
+            from forestgump.memory import MemoryManager
+        except (ImportError, ModuleNotFoundError):
+            MemoryManager = None
+        
         print(f"\n{Colors.info('╔════════════════════════════════════════╗')}")
         print(f"{Colors.info('║  ForestGump Chat - Pentesting Agent    ║')}")
         print(f"{Colors.info('╚════════════════════════════════════════╝')}\n")
@@ -266,19 +613,134 @@ class ForestGumpCLI:
             if args.query:
                 print(f"{Colors.info('[*]')} Query: {args.query}")
         
-        # Handle single query mode
-        if args.query:
-            session_id = self.sessions.save_session(args.query, provider, model)
+        # Determine session_id (resume or new)
+        if args.resume:
+            session_id = args.resume
+            session = self.sessions.load_session(session_id)
+            if not session:
+                print(f"{Colors.error('[!]')} Session not found: {session_id}\n")
+                return
+            if not args.quiet:
+                print(f"{Colors.success('[+]')} Resumed session: {session_id}\n")
+        elif args.__dict__.get('continue'):
+            # Resume most recent session
+            recent = self.sessions.list_sessions(limit=1)
+            if not recent:
+                print(f"{Colors.error('[!]')} No recent sessions found\n")
+                return
+            session_id = recent[0]["id"]
+            session = self.sessions.load_session(session_id)
+            if not args.quiet:
+                print(f"{Colors.success('[+]')} Resumed session: {session_id}\n")
+        else:
+            # Create new session
+            query = args.query or "Interactive pentesting session"
+            session_id = self.sessions.save_session(query, provider, model)
+            session = {"session_id": session_id, "task": query, "messages": []}
             if not args.quiet:
                 print(f"{Colors.success('[+]')} Session ID: {session_id}\n")
+        
+        # Load memory manager for this session (if available)
+        if MemoryManager:
+            memory = MemoryManager(session_id)
+        else:
+            memory = None
+        
+        # Build system prompt with memory context (if memory available)
+        if memory:
+            system_prompt = self._build_system_prompt(memory)
+            if not args.quiet and memory.get_context():
+                print(f"{Colors.info('[*]')} Memory context loaded\\n")
+        else:
+            system_prompt = None
+        
+        # Handle single query mode
+        if args.query:
+            if not args.quiet:
+                print(f"{Colors.info('[*]')} Processing query (demo mode)...\n")
             
-            # Placeholder: actual chat logic would go here in phase 2
-            print(f"{Colors.info('[*]')} Processing query (demo mode)...")
-            print(f"Response would be displayed here.\n")
+            # In a real implementation, here we would:
+            # 1. Call provider.chat(system_prompt, args.query)
+            # 2. Parse response for [MEMORY UPDATE] blocks
+            # 3. Apply updates to memory
+            # 4. Save updated session
+            
+            print(f"{Colors.info('[*]')} Response would be displayed here.\n")
+            context_size = len(memory.get_context())
+            if context_size > 0:
+                print(f"{Colors.info('[*]')} System prompt includes memory context of {context_size} chars\n")
+            
+            # Save session with memory snapshot
+            session["messages"] = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": args.query}
+            ]
+            session["memory_snapshot"] = {
+                "facts": memory.memory.list_facts(),
+                "credentials": [c.to_dict() for c in memory.memory.credentials],
+                "networks": list(memory.memory.networks.keys()),
+                "notes": memory.memory.list_notes(),
+            }
+            self.sessions.save_session(args.query, provider, model, session.get("messages", []))
             return
         
-        # Interactive mode placeholder
-        print(f"{Colors.warning('[!]')} Interactive mode not yet implemented (demo mode)\n")
+        # Interactive mode - create mock provider for now
+        # In production, this would be a real provider instance
+        mock_provider = self._create_mock_provider(provider, model)
+        
+        # Enter interactive REPL
+        repl = InteractiveREPL(
+            provider=mock_provider,
+            model=model,
+            provider_name=provider,
+            session_dir=self.sessions.sessions_dir,
+            session_id=session_id
+        )
+        repl.run()
+    
+    def _create_mock_provider(self, provider_name: str, model: str):
+        """Create a mock provider for testing. In production, use real provider."""
+        class MockProvider:
+            def __init__(self, name: str, model: str):
+                self.name = name
+                self.model = model
+            
+            def chat(self, message: str, history: List[Dict] = None) -> str:
+                # Mock response - in production, call real API
+                return f"[Mock {self.name}] This is a demo response to: {message}"
+        
+        return MockProvider(provider_name, model)
+    
+    def _build_system_prompt(self, memory) -> str:
+        """Build system prompt with memory context injection.
+        
+        Args:
+            memory: MemoryManager instance for the session
+            
+        Returns:
+            Complete system prompt including memory context
+        """
+        base_prompt = """You are a pentesting agent running on Kali Linux. You have access to:
+- nmap: Network scanning and enumeration
+- netcat: Network communication and testing
+- metasploit: Exploit framework and tools
+- aircrack-ng: WiFi security testing
+- hashcat: Password cracking
+- sqlmap: SQL injection testing
+- And other standard penetration testing tools
+
+Your role is to help with authorized security testing and vulnerability assessment.
+Always respect scope and legal boundaries."""
+        
+        memory_context = memory.get_context()
+        
+        if memory_context:
+            return f"""{base_prompt}
+
+Memory Context (Previous Session Information):
+{memory_context}"""
+        else:
+            return base_prompt
     
     def model_select(self, args):
         """Select default model and provider."""
