@@ -104,7 +104,7 @@ class ModelDiscovery:
 class ProviderManager:
     """Manage provider configuration and detection."""
     
-    PROVIDERS = ["groq", "claude", "anthropic", "copilot", "ollama"]
+    PROVIDERS = [\"copilot\", \"claude\", \"anthropic\", \"ollama\", \"groq\"]
     
     def __init__(self):
         self.config_dir = Path.home() / ".forestgump"
@@ -120,7 +120,7 @@ class ProviderManager:
                     return json.load(f)
             except Exception:
                 pass
-        return {"provider": "groq", "model": "llama-3.3-70b-versatile"}
+        return {\"provider\": \"copilot\", \"model\": \"claude-haiku-4-5\"}
     
     def _save_config(self):
         """Save configuration to file."""
@@ -143,28 +143,28 @@ class ProviderManager:
         return True
     
     def get_provider(self) -> str:
-        """Get active provider."""
-        return self.config.get("provider", "groq")
+        """Get default provider from config."""
+        return self.config.get(\"provider\", \"copilot\")
     
     def get_model(self) -> str:
-        """Get active model."""
-        return self.config.get("model", "llama-3.3-70b-versatile")
+        """Get default model from config."""
+        return self.config.get(\"model\", \"claude-haiku-4-5\")
     
     def detect_api_keys(self) -> Dict[str, bool]:
-        """Detect which providers have API keys configured."""
+        """Detect which providers have API keys or are available."""
         return {
             "groq": bool(os.environ.get("GROQ_API_KEY")),
-            "claude": bool(os.environ.get("ANTHROPIC_API_KEY")),
+            "claude": self._check_claude_cli(),
             "anthropic": bool(os.environ.get("ANTHROPIC_API_KEY")),
-            "copilot": bool(os.environ.get("COPILOT_API_KEY")),
+            "copilot": self._check_copilot(),
             "ollama": self._check_ollama(),
         }
     
-    def _check_ollama(self) -> bool:
-        """Check if Ollama is running locally."""
+    def _check_claude_cli(self) -> bool:
+        """Check if Claude CLI is installed."""
         try:
             subprocess.run(
-                ["curl", "-s", "http://localhost:11434/api/tags"],
+                ["claude", "--version"],
                 capture_output=True,
                 timeout=2,
                 check=False
@@ -173,13 +173,31 @@ class ProviderManager:
         except Exception:
             return False
     
-    def create_provider(self, provider_name: str):
-        """Create and return a provider instance by name."""
+    def _check_copilot(self) -> bool:
+        """Check if GitHub Copilot CLI is available."""
+        try:
+            subprocess.run(
+                ["gh", "copilot", "--version"],
+                capture_output=True,
+                timeout=2,
+                check=False
+            )
+            return True
+        except Exception:
+            return False
+    
+    def create_provider(self, provider_name: str, model: str = None):
+        """Create and return a provider instance by name.
+        
+        Args:
+            provider_name: Name of provider (groq, claude, anthropic, copilot)
+            model: Optional model name/alias to pass to provider
+        """
         try:
             if provider_name == "groq":
                 return GroqProvider()
             elif provider_name == "claude":
-                return ClaudeCliProvider()
+                return ClaudeCliProvider(model=model or "haiku")
             elif provider_name == "anthropic":
                 return AnthropicProvider()
             elif provider_name == "copilot":

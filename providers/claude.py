@@ -12,10 +12,14 @@ from providers.base import Provider
 class ClaudeCliProvider(Provider):
     """Claude CLI provider using subprocess integration."""
     
-    def __init__(self):
-        """Initialize Claude CLI provider."""
+    def __init__(self, model: str = "haiku"):
+        """Initialize Claude CLI provider.
+        
+        Args:
+            model: Claude model alias (haiku, sonnet, opus) or full name
+        """
         super().__init__("claude")
-        self.model = "claude-3.5-sonnet"  # Latest Claude model
+        self.model = model  # Use provided model (default: haiku)
         self._available = self._check_claude_cli()
     
     def _check_claude_cli(self) -> bool:
@@ -61,7 +65,7 @@ class ClaudeCliProvider(Provider):
         
         try:
             result = subprocess.run(
-                ["claude", "-p", prompt],
+                ["claude", "--model", self.model, "-p", prompt],
                 capture_output=True,
                 timeout=30,
                 text=True,

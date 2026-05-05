@@ -1,24 +1,31 @@
 """
 GitHub Copilot provider implementation.
-Uses subprocess to call `gh copilot suggest` command.
+Uses Copilot API with Claude Haiku 4.5 (matching Hermes default).
 """
 
+import os
 import subprocess
 from typing import List, Dict, Optional
 from providers.base import Provider
 
 
 class CopilotProvider(Provider):
-    """GitHub Copilot CLI provider using subprocess integration."""
+    """GitHub Copilot API provider with Claude Haiku 4.5."""
     
-    def __init__(self):
+    def __init__(self, model: str = "claude-haiku-4-5"):
         """Initialize GitHub Copilot provider."""
         super().__init__("copilot")
-        self.model = "github-copilot"  # Abstracted model name
-        self._available = self._check_gh_cli()
+        self.model = model  # Default: claude-haiku-4-5 (Hermes default)
+        self._api_key = os.environ.get("GITHUB_COPILOT_TOKEN")
+        self._available = self._check_availability()
     
-    def _check_gh_cli(self) -> bool:
-        """Check if GitHub CLI is installed and authenticated."""
+    def _check_availability(self) -> bool:
+        """Check if Copilot API is available (has token or gh auth)."""
+        # Try API key first
+        if self._api_key:
+            return True
+        
+        # Fallback: check gh CLI auth
         try:
             result = subprocess.run(
                 ["gh", "auth", "status"],
@@ -36,54 +43,59 @@ class CopilotProvider(Provider):
         system_prompt: Optional[str] = None,
     ) -> str:
         """
-        Send chat request via GitHub Copilot CLI.
-        Note: Copilot is limited in capabilities - no system prompts or multi-turn.
+        Send chat request via GitHub Copilot API with Claude Haiku.
         
         Args:
             messages: List of message dicts with 'role' and 'content'
-            system_prompt: Ignored (Copilot doesn't support system prompts)
+            system_prompt: System prompt to include
             
         Returns:
             Plain text response
             
         Raises:
-            RuntimeError: If not available or CLI call fails
+            RuntimeError: If not available or API call fails
         """
         if not self.is_available:
             raise RuntimeError(
-                "GitHub Copilot CLI not available. "
-                "Install gh CLI and run: gh extension install github/gh-copilot"
+                "GitHub Copilot not available. "
+                "Set GITHUB_COPILOT_TOKEN or run: gh auth login"
             )
         
         self._validate_messages(messages)
         
-        # Extract the last user message (Copilot doesn't support multi-turn context)
-        prompt = self._extract_last_user_message(messages)
+        try:
+            import requests
+        except ImportError:
+            raise RuntimeError("requests library required: pip install requests")
         
-        if not prompt:
-            raise RuntimeError("No user message found in messages")
+        # Build request payload (OpenAI-compatible API)
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 2048,
+        }
+        
+        if system_prompt:
+            payload["messages"] = [
+                {"role": "system", "content": system_prompt}
+            ] + messages
+        
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
         
         try:
-            result = subprocess.run(
-                ["gh", "copilot", "suggest", "--shell", prompt],
-                capture_output=True,
+            response = requests.post(
+                "https://api.githubcopilot.com/chat/completions",
+                json=payload,
+                headers=headers,
                 timeout=30,
-                text=True,
             )
+            response.raise_for_status()
             
-            if result.returncode != 0:
-                raise RuntimeError(f"Copilot CLI error: {result.stderr}")
-            
-            return result.stdout.strip()
-        
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("Copilot CLI request timed out")
+            result = response.json()
+            return result["choices"][0]["message"]["content"]
         except Exception as e:
-            raise RuntimeError(f"Copilot CLI call failed: {e}")
-    
-    def _extract_last_user_message(self, messages: List[Dict[str, str]]) -> str:
-        """Extract the last user message from the conversation."""
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                return msg.get("content", "")
-        return ""
+            raise RuntimeError(f"Copilot API error: {e}")

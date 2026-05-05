@@ -9,8 +9,8 @@ class MenuSystem:
 
     def __init__(self):
         """Initialize MenuSystem with default provider and models."""
-        self._provider = "ollama"
-        self._model = "llama3.2:latest"
+        self._provider = "copilot"
+        self._model = "claude-haiku-4-5"
         self._history: List[str] = []
         self.no_confirm = False
 
@@ -25,8 +25,8 @@ class MenuSystem:
             "Exit",
         ]
 
-        # Provider list
-        self._providers = ["ollama", "claude", "anthropic", "copilot"]
+        # Provider list (copilot first as default)
+        self._providers = ["copilot", "claude", "anthropic", "ollama"]
 
         # Local models (15+)
         self._local_models = [
