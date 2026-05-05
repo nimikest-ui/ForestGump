@@ -21,7 +21,7 @@ class MenuSystem:
             "Ask Question",
             "Continue",
             "Clear Memory",
-            "Show Current Model",
+            "Show Model",
             "Exit",
         ]
 
