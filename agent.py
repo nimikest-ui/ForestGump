@@ -65,6 +65,20 @@ _RED = '\033[31m' if _USE_COLOR else ''
 _YLW = '\033[33m' if _USE_COLOR else ''
 _ORG = '\033[38;5;208m' if _USE_COLOR else ''
 
+
+def print_finding(title, content):
+    """Print a finding in clear format."""
+    print(f'\n{_GRN}[*]{_RST} {_BLD}{title}:{_RST}')
+    if isinstance(content, list):
+        for item in content:
+            print(f'    • {item}')
+    elif isinstance(content, dict):
+        for key, val in content.items():
+            print(f'    {key}: {val}')
+    else:
+        print(f'    {content}')
+
+
 # ── Bottom status bar state ──────────────────────────────────
 _bar_active = False
 _bar_state  = {'mode': 'manual', 'session_tok': 0, 'turn': 0, 'action': '', 'session_start_time': 0.0, 'tokens_remaining': 0}
@@ -239,6 +253,13 @@ def is_dangerous(cmd):
     return None
 
 
+def is_package_manager_cmd(cmd):
+    """Detect if command is a package manager operation (apt, yum, pip, etc.)."""
+    managers = r'\b(apt|apt-get|yum|dnf|pacman|brew|pip|pip3|npm|yarn|cargo)\b'
+    operations = r'\b(install|update|upgrade|remove|search)\b'
+    return bool(re.search(managers, cmd)) and bool(re.search(operations, cmd))
+
+
 def sanitize_command(cmd):
     """Rewrite background patterns to foreground-friendly equivalents."""
     original = cmd
@@ -267,6 +288,26 @@ def sanitize_command(cmd):
         inner = flat.rstrip('& ').strip()
         inner = re.sub(r'^(sudo\s+)?timeout\s+\d+\s+', r'\1', inner)
         return f'timeout 30 {inner}'
+
+    # Package manager commands get extended timeout (180s for large downloads/installs)
+    if is_package_manager_cmd(flat):
+        m = re.match(r'^(sudo\s+)?timeout\s+(\d+)\s+(.+)', flat)
+        if m:
+            # Already has timeout, extend if needed
+            seconds = int(m.group(2))
+            if seconds < 180:
+                prefix = m.group(1) or ''
+                return f'{prefix}timeout 180 {m.group(3)}'
+        else:
+            # Add timeout if not present — wrap entire chain in bash -c
+            has_sudo = flat.startswith('sudo ')
+            cmd_part = flat.removeprefix('sudo ').strip()
+            # Escape quotes in the command for bash -c
+            escaped_cmd = cmd_part.replace('"', '\\"')
+            if has_sudo:
+                return f'sudo timeout 180 bash -c "{escaped_cmd}"'
+            else:
+                return f'timeout 180 bash -c "{escaped_cmd}"'
 
     # Cap excessively long timeouts (35s to allow airodump-ng 25s captures)
     m = re.match(r'^(sudo\s+)?timeout\s+(\d+)\s+(.+)', flat)
@@ -391,6 +432,10 @@ class Shell:
 
 
 # ─── Model Providers ─────────────────────────────────────────
+# Contract: all providers must implement chat(messages, system) → (response_text, usage_dict)
+# - response_text: str, the LLM's response
+# - usage_dict: dict with keys 'input_tokens', 'output_tokens' (and optionally cache metrics)
+#   If token counts are unavailable, return 0 values (not None).
 
 class AnthropicProvider:
     def __init__(self, model='claude-sonnet-4-20250514'):
@@ -401,8 +446,12 @@ class AnthropicProvider:
         self.is_haiku = 'haiku' in model.lower()
 
     def chat(self, messages, system):
+        """Send messages to Claude via Anthropic API. Returns (response_text, usage_dict)."""
         # Haiku: 1024 (tight, fast). Others: 4096 (standard).
         max_tok = 1024 if self.is_haiku else 4096
+        # Cache system prompt (ephemeral: 5 min TTL, cost-free creation).
+        # Subsequent calls within 5 min read from cache at 90% token cost.
+        # For Haiku: typical system prompt ~1500 tokens → ~150 cached read (1 turn saves ~1350 tokens = $0.0003).
         kwargs = {
             'model': self.model,
             'max_tokens': max_tok,
@@ -451,6 +500,7 @@ class OllamaProvider:
         self.name = f'ollama/{model}'
 
     def chat(self, messages, system):
+        """Send messages to model via Ollama. Returns (response_text, usage_dict)."""
         msgs = [{'role': 'system', 'content': system}] + messages
         r = self.client.chat(self.model, messages=msgs)
         usage = {
@@ -469,6 +519,7 @@ class ClaudeCliProvider:
         self._history = []  # maintain conversation for context
 
     def chat(self, messages, system):
+        """Send messages to Claude via Claude Code CLI. Returns (response_text, usage_dict)."""
         # Build the full prompt from conversation history
         prompt_parts = []
         for msg in messages:
@@ -531,6 +582,10 @@ class CopilotProvider:
         self.name = f'copilot/{model}'
 
     def chat(self, messages, system):
+        """Send messages to Claude via GitHub Copilot CLI. Returns (response_text, usage_dict).
+
+        Note: Copilot CLI does not return token counts, so usage dict contains zeros.
+        """
         # Build a single prompt from conversation history (same pattern as ClaudeCliProvider)
         prompt_parts = [f'[System instructions]\n{system}']
         for msg in messages:
@@ -583,7 +638,8 @@ class CopilotProvider:
 
         # Remove null bytes and control chars that cause issues downstream
         output = ''.join(c for c in output if c not in '\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f')
-        return output, None  # Copilot CLI provides no token usage
+        # Return empty usage dict (Copilot CLI doesn't provide token counts, but interface is consistent)
+        return output, {'input_tokens': 0, 'output_tokens': 0}
 
 
 # ─── Memory ───────────────────────────────────────────────────
@@ -621,7 +677,10 @@ def memory_context(mem, compact=False):
     if mem.get('credentials'):  # Credentials first (highest priority)
         creds = []
         for target, info in list(mem['credentials'].items())[-3:]:  # Last 3 only
-            creds.append(f'- {target}: {info.get("username", "?")}@{info.get("password", "?")}')
+            if isinstance(info, dict):
+                creds.append(f'- {target}: {info.get("username", "?")}@{info.get("password", "?")}')
+            elif isinstance(info, str):
+                creds.append(f'- {target}: {info}')
         if creds:
             parts.append('Creds: ' + '; '.join(creds) if compact else 'Credentials found:\n' + '\n'.join(creds))
     if mem.get('networks'):
@@ -1262,15 +1321,25 @@ SYSTEM = """You have a live bash shell on Kali Linux. Achieve your goal.
 CRITICAL:
 - Output ONE <cmd>...</cmd> per response. Wait for output.
 - No multiple <cmd> blocks. No guessing output.
-- Use sudo for root. Use `timeout N cmd` for time limits (max 35s).
+- Use sudo for root. Use `timeout N cmd` for time limits (max 35s for normal, 180s for apt/pip).
+- Only use widely-available tools: grep, find, cat, ls, sed, awk, strings, xxd, unzip, tar, etc.
+- Before using unknown tools, either: (1) check with `which` first, or (2) install first: `sudo apt install -y <tool>`
+- Don't chain with && if first cmd might fail (use separate commands instead)
 - wlan1 = monitor mode (NO airmon-ng). airodump-ng: write to file, read after.
 - BT safe: hcitool, bluetoothctl, hciconfig only. NO sdptool/rfcomm/gatttool.
 - Failed? Try different approach. Don't retry same tool.
-- When done: <done>accomplishment</done>
-- NEVER wlan0."""
+- NEVER wlan0.
+
+BEFORE FINISHING:
+- Summarize all findings, credentials, files, data discovered
+- Include specific results: usernames, passwords, IPs, flags, etc.
+- List key files or evidence found
+- When done: <done>SUMMARY: [findings here]</done>
+
+DO NOT just exit. Always provide a clear summary of what was accomplished."""
 
 
-def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_message_history=None):
+def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_message_history=None, verbose=False):
     from ui_modal import init_ui
     ui = init_ui()
 
@@ -1288,7 +1357,10 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
     # Initialize skills DB and migrate techniques.json on first run
     init_skills_db()
     seed_bandit_skills()  # Auto-seed with bandit foundational strategies
-    migrate_techniques_json(SCRIPT_DIR / 'techniques.json')
+    # One-time migration: skip if already done (flag in memory)
+    if not mem.get('_migrated_techniques'):
+        migrate_techniques_json(SCRIPT_DIR / 'techniques.json')
+        mem['_migrated_techniques'] = True
 
     # Detect if Haiku — use aggressive token reduction for cost/speed
     is_haiku = 'haiku' in provider.name.lower()
@@ -1403,6 +1475,16 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
                 # Trim message history before sending to reduce token usage
                 # Keep full history in memory for logging; send only recent context to LLM
                 trimmed_msgs = trim_message_history(messages, max_history=max_message_history)
+
+                if verbose:
+                    print(f'\n{_DIM}[VERBOSE] System prompt ({len(full_system)} chars):{_RST}')
+                    print(f'{_DIM}{full_system[:500]}...{_RST}\n' if len(full_system) > 500 else f'{_DIM}{full_system}{_RST}\n')
+                    print(f'{_DIM}[VERBOSE] Sending {len(trimmed_msgs)} messages to LLM:{_RST}')
+                    for i, msg in enumerate(trimmed_msgs):
+                        content_preview = msg['content'][:100] + ('...' if len(msg['content']) > 100 else '')
+                        print(f'  {i+1}. [{msg["role"]}] {content_preview}')
+                    print()
+
                 response, usage = provider.chat(trimmed_msgs, full_system)
                 _spinner.stop()
             except Exception as e:
@@ -1460,9 +1542,8 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
             cmd = cmd_m.group(1).strip()
 
             # ── Repeat-command loop-breaker ──
-            # Count consecutive failures for this specific tool at the tail of the log.
-            # A success or a different command breaks the streak — prevents false positives
-            # when a tool succeeds between failures.
+            # 1. Count consecutive failures of SAME tool
+            # 2. Also check if last N turns have mostly failures (overall loop detection)
             cmd_base = command_base(cmd)
             consecutive_failures = 0
             for entry in reversed(log):
@@ -1476,6 +1557,10 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
                 else:
                     break  # success: streak resets to 0
 
+            # Also check: are MOST recent commands failing? (overall productivity check)
+            recent_execs = [e for e in reversed(log) if e.get('type') == 'exec'][:8]
+            recent_failures = sum(1 for e in recent_execs if is_command_failure(e.get('output', ''), command_base(e.get('cmd', ''))))
+
             loop_threshold = 4 if cmd_base in ('aireplay-ng', 'aircrack-ng') else 3
             if cmd_base and consecutive_failures >= loop_threshold:
                 print(f'\n  {_YLW}⚡{_RST} Loop break — `{cmd_base}` failed {consecutive_failures}× in a row')
@@ -1487,6 +1572,20 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
                     ),
                 })
                 log.append({'turn': turn, 'type': 'loop_break', 'cmd': cmd, 'ts': time.time()})
+                continue
+
+            # Overall productivity check: if 3+ of last 5 commands failed, something is fundamentally wrong
+            if len(recent_execs) >= 5 and recent_failures >= 3:
+                print(f'\n  {_YLW}⚡{_RST} Overall loop — last 8 commands: {recent_failures} failures')
+                messages.append({
+                    'role': 'user',
+                    'content': (
+                        f'STOP. Last {recent_failures} out of {len(recent_execs)} commands have failed. You are stuck in a loop. '
+                        f'The current approach is not working. Think of a fundamentally different strategy or goal. '
+                        f'What information are you actually trying to get? Try a different method.'
+                    ),
+                })
+                log.append({'turn': turn, 'type': 'loop_break', 'reason': f'{recent_failures}/{len(recent_execs)} failures', 'ts': time.time()})
                 continue
 
             # ── Secondary loop-breaker: repeated 404 responses ──
@@ -1744,8 +1843,14 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
                 output = ''  # populated below
             else:
                 # Detect if command uses timeout already, respect it; otherwise cap at 15s
+                # Package manager commands get 180s; other commands get 15-35s
                 timeout_m = re.search(r'timeout\s+(\d+)', cmd)
-                cmd_timeout = min(int(timeout_m.group(1)) + 5, 30) if timeout_m else 15
+                if timeout_m:
+                    cmd_timeout = min(int(timeout_m.group(1)) + 5, 200)
+                elif is_package_manager_cmd(cmd):
+                    cmd_timeout = 185  # Allow 180s timeout + 5s buffer
+                else:
+                    cmd_timeout = 15
                 t_exec_start = time.time()
                 output = shell.run(cmd, timeout=cmd_timeout)
                 t_exec_end = time.time()
@@ -1775,14 +1880,17 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
                 else:
                     output = f'[airodump-ng ran for {elapsed}s — no -w path specified, cannot read output]'
 
-            # Detect empty/broken output — shell might be corrupted by ncurses
+            # Only reset shell if there was an actual timeout (not just empty output)
+            # Empty output is normal for many commands (which, test, etc.)
             elif not is_airodump and not is_aireplay and not is_bluetooth and not is_nmap:
-                clean = output.replace('echo', '').replace('[command timed out]', '').strip()
-                if not clean or clean == 'echo':
-                    print(f'  {_DIM}↻ empty output, shell reset{_RST}')
+                if '[command timed out]' in output:
+                    print(f'  {_DIM}↻ command timeout, shell reset{_RST}')
                     shell.close()
                     shell = Shell()
-                    output = f'[command returned no output after {cmd_timeout}s — the shell has been reset.]'
+                    output = f'[command timed out after {cmd_timeout}s — shell has been reset.]'
+                elif not output.strip() or output.strip() == 'echo':
+                    # Command produced no output (which, test, etc.) — that's fine
+                    output = '[command completed with no output]'
 
             # Truncate for display, compress for context (token optimization)
             display_len = 2000 if is_haiku else 5000
@@ -1878,11 +1986,16 @@ def main():
     ap.add_argument('--host', help='Ollama host URL (default: http://localhost:11434)')
     ap.add_argument('--no-confirm', action='store_true',
                     help='Skip command confirmation (YOLO mode)')
+    ap.add_argument('--verbose', action='store_true',
+                    help='Show system prompt and messages sent to LLM (debug mode)')
     ap.add_argument('--max-turns', type=int, default=50)
     ap.add_argument('--resume', metavar='SESSION', help='Resume a previous session (path to session JSON)')
     ap.add_argument('--list-sessions', action='store_true', help='List recent sessions')
     ap.add_argument('task', nargs='?', help='What to do (prompted if omitted)')
     args = ap.parse_args()
+
+    if args.verbose:
+        print(f'{_DIM}[DEBUG MODE ENABLED]{_RST}\n')
 
     # List sessions
     if args.list_sessions:
@@ -1927,7 +2040,7 @@ def main():
         task = args.task or ''
 
     os.system('clear' if os.name != 'nt' else 'cls')
-    run_agent(provider, task, max_turns=args.max_turns, confirm=not args.no_confirm, resume_data=resume_data)
+    run_agent(provider, task, max_turns=args.max_turns, confirm=not args.no_confirm, resume_data=resume_data, verbose=args.verbose)
 
 
 if __name__ == '__main__':
