@@ -20,7 +20,7 @@ from src.forestgump.skills.extractor import SkillExtractor
 
 # UI imports
 from src.forestgump.ui.menu import MenuSystem
-from src.forestgump.ui.colors import ColorUtils
+from src.forestgump.ui import colors
 
 # Provider imports
 from src.forestgump.providers.base import BaseProvider
@@ -39,7 +39,7 @@ __all__ = [
     "SkillsDatabase",
     "SkillExtractor",
     "MenuSystem",
-    "ColorUtils",
+    "colors",
     "BaseProvider",
     "ClaudeProvider",
     "OllamaProvider",
