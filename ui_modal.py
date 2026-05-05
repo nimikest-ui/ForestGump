@@ -15,9 +15,20 @@ try:
     from rich.panel import Panel
     from rich.text import Text
     from rich.align import Align
+    _RICH_AVAILABLE = True
 except ImportError:
-    print("ERROR: rich library required. Install: pip install rich")
-    sys.exit(1)
+    _RICH_AVAILABLE = False
+    # Define stubs so code doesn't break
+    class Console:
+        def __init__(self): pass
+        def print(self, *args, **kwargs): print(*args)
+    class Panel:
+        def __init__(self, *args, **kwargs): pass
+    class Text:
+        def __init__(self, *args, **kwargs): pass
+    class Align:
+        @staticmethod
+        def center(obj): return obj
 
 
 _GLD = '\033[1;38;2;255;215;0m'   # #FFD700 gold (Hermes theme)
@@ -53,6 +64,10 @@ class RichModalUI:
 
     def show_modal(self, title: str, content: str, width: Optional[int] = None) -> None:
         """Display a centered floating modal window."""
+        if not _RICH_AVAILABLE:
+            print(f'\n{_GLD}{title}{_RST}\n{content}\n')
+            return
+
         width = width or min(70, self.width - 4)
 
         panel = Panel(
