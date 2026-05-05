@@ -155,7 +155,7 @@ class ProviderManager:
         return {
             "groq": bool(os.environ.get("GROQ_API_KEY")),
             "claude": self._check_claude_cli(),
-            "anthropic": bool(os.environ.get("ANTHROPIC_API_KEY")),
+            "anthropic": self._check_anthropic(),
             "copilot": self._check_copilot(),
             "ollama": self._check_ollama(),
         }
@@ -185,6 +185,19 @@ class ProviderManager:
             return True
         except Exception:
             return False
+    
+    def _check_ollama(self) -> bool:
+        """Check if Ollama is running locally."""
+        try:
+            import requests
+            response = requests.get("http://localhost:11434/api/tags", timeout=2)
+            return response.status_code == 200
+        except Exception:
+            return False
+    
+    def _check_anthropic(self) -> bool:
+        """Check if Anthropic API key is available."""
+        return bool(os.environ.get("ANTHROPIC_API_KEY"))
     
     def create_provider(self, provider_name: str, model: str = None):
         """Create and return a provider instance by name.
