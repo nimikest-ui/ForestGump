@@ -22,8 +22,6 @@ RESET = "\033[0m"
 BOLD = "\033[1m"
 
 VERSION = "2.0.0-hermes-compatible"
-CONFIG_DIR = Path.home() / ".forestgump"
-SESSIONS_DIR = Path("/root/ForestGump/sessions")
 
 
 class Colors:
@@ -98,8 +96,9 @@ class ProviderManager:
     PROVIDERS = ["groq", "claude", "anthropic", "copilot", "ollama"]
     
     def __init__(self):
-        self.config_file = CONFIG_DIR / "config.json"
-        CONFIG_DIR.mkdir(exist_ok=True)
+        self.config_dir = Path.home() / ".forestgump"
+        self.config_file = self.config_dir / "config.json"
+        self.config_dir.mkdir(parents=True, exist_ok=True)
         self.config = self._load_config()
     
     def _load_config(self) -> Dict[str, Any]:
@@ -117,6 +116,7 @@ class ProviderManager:
         try:
             with open(self.config_file, "w") as f:
                 json.dump(self.config, f, indent=2)
+            os.chmod(self.config_file, 0o600)  # Owner read/write only
         except Exception as e:
             print(f"{Colors.error('[!]')} Failed to save config: {e}")
     
@@ -167,12 +167,13 @@ class SessionManager:
     """Manage session persistence and resumption."""
     
     def __init__(self):
-        SESSIONS_DIR.mkdir(exist_ok=True)
+        self.sessions_dir = Path.home() / ".forestgump" / "sessions"
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
     
     def save_session(self, task: str, provider: str, model: str, messages: List[Dict] = None) -> str:
         """Save a new session and return session ID."""
         session_id = datetime.now().strftime("%Y%m%dT%H%M%S")
-        session_file = SESSIONS_DIR / f"{session_id}.json"
+        session_file = self.sessions_dir / f"{session_id}.json"
         
         session_data = {
             "session_id": session_id,
@@ -194,7 +195,7 @@ class SessionManager:
     
     def load_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Load a session by ID."""
-        session_file = SESSIONS_DIR / f"{session_id}.json"
+        session_file = self.sessions_dir / f"{session_id}.json"
         if not session_file.exists():
             return None
         
@@ -209,7 +210,7 @@ class SessionManager:
         """List recent sessions."""
         sessions = []
         try:
-            session_files = sorted(SESSIONS_DIR.glob("*.json"), reverse=True)[:limit]
+            session_files = sorted(self.sessions_dir.glob("*.json"), reverse=True)[:limit]
             for session_file in session_files:
                 try:
                     with open(session_file) as f:
@@ -229,7 +230,7 @@ class SessionManager:
     
     def delete_session(self, session_id: str) -> bool:
         """Delete a session."""
-        session_file = SESSIONS_DIR / f"{session_id}.json"
+        session_file = self.sessions_dir / f"{session_id}.json"
         if not session_file.exists():
             return False
         
@@ -350,7 +351,7 @@ class ForestGumpCLI:
         print(f"\n{Colors.info('ForestGump Status:')}")
         print(f"  Version: {VERSION}")
         print(f"  Config: {self.providers.config_file}")
-        print(f"  Sessions: {SESSIONS_DIR}")
+        print(f"  Sessions: {self.sessions.sessions_dir}")
         
         api_keys = self.providers.detect_api_keys()
         print(f"\n{Colors.info('Provider Status:')}")
