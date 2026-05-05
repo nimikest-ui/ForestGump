@@ -711,60 +711,255 @@ class MenuSystem:
             sys.exit(1)
 
     def _run_with_fixed_input(self, provider, model, initial_task=None):
-        """Run with PromptSession and fixed input prompt.
+        """Run with full Application layout: output + status bar + input.
 
-        Shows agent output above a fixed prompt line, with slash command autocomplete.
-        Agent runs in foreground; user can interrupt with Ctrl+C.
+        Implements Hermes-style TUI with:
+        - Scrollable output area (top)
+        - Status bar with provider/model/tokens/turns (middle)
+        - Fixed input prompt (bottom)
+        - Background agent execution
+        - Real-time output streaming
         """
-        prompt_session = PromptSession(
-            history=FileHistory(str(SCRIPT_DIR / '.prompt_history')),
+        import io
+        from threading import Event, Condition
+        from prompt_toolkit.layout.controls import BufferControl
+        from prompt_toolkit.layout.containers import Window, WindowAlign
+        from prompt_toolkit.filters import Condition as PTCondition
+
+        # ─── Thread-safe output buffer ───
+        class OutputBuffer:
+            def __init__(self, max_lines=500):
+                self.lines = []
+                self.lock = threading.Lock()
+                self.max_lines = max_lines
+                self.cond = Condition(self.lock)
+
+            def append(self, text):
+                if not text:
+                    return
+                with self.cond:
+                    for line in text.rstrip('\n').split('\n'):
+                        self.lines.append(line)
+                    if len(self.lines) > self.max_lines:
+                        self.lines = self.lines[-self.max_lines:]
+                    self.cond.notify_all()
+
+            def get_text(self):
+                with self.lock:
+                    return '\n'.join(self.lines[-200:])  # Display last 200 lines
+
+            def clear(self):
+                with self.lock:
+                    self.lines.clear()
+
+        # ─── Status tracker ───
+        class Status:
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.tokens = 0
+                self.turns = 0
+                self.context = '—'
+                self.agent_running = False
+
+            def update(self, **kwargs):
+                with self.lock:
+                    for k, v in kwargs.items():
+                        setattr(self, k, v)
+
+            def get(self):
+                with self.lock:
+                    return {
+                        'tokens': self.tokens,
+                        'turns': self.turns,
+                        'context': self.context,
+                        'agent_running': self.agent_running,
+                    }
+
+        output_buf = OutputBuffer()
+        status = Status()
+        app_ref = [None]  # Will hold Application instance
+
+        # Display startup info with tools and skills
+        output_buf.append('')
+        output_buf.append(f'  {_GLD}⚕ Forest Gump{_RST}  {_BLD}Bare Metal Agent{_RST}')
+        output_buf.append('')
+        output_buf.append(f'  {_DIM}Provider{_RST}  {_GLD}{provider}{_RST}  {_DIM}{model}{_RST}')
+
+        # Available tools
+        tools = {
+            'bash': 'Shell execution',
+            'memory': 'Persistent facts & credentials',
+            'skills': 'Learned attack patterns',
+            'pty': 'Interactive terminal',
+        }
+        output_buf.append(f'\n  {_DIM}Available Tools{_RST}')
+        for tool, desc in tools.items():
+            output_buf.append(f'    {_GLD}•{_RST}  {tool:<12}  {_DIM}{desc}{_RST}')
+
+        # Available skills (from database)
+        try:
+            from skills import search_skills
+            all_skills = search_skills('')
+            skill_count = len(all_skills) if all_skills else 0
+            output_buf.append(f'\n  {_DIM}Learned Skills{_RST}')
+            if skill_count > 0:
+                output_buf.append(f'    {skill_count} patterns stored  {_DIM}(search with task keywords){_RST}')
+                # Show top 3 by success rate
+                for skill in sorted(all_skills, key=lambda s: s.get('success_rate', 0), reverse=True)[:3]:
+                    rate = f"{skill.get('success_rate', 0):.0%}"
+                    output_buf.append(f'      {_GLD}▸{_RST}  {skill.get("name", "?")[:30]:<30}  {_DIM}{rate}{_RST}')
+            else:
+                output_buf.append(f'    {_DIM}(None yet — skills learned after successful runs){_RST}')
+        except:
+            output_buf.append(f'\n  {_DIM}Learned Skills{_RST}')
+            output_buf.append(f'    {_DIM}(Database not initialized){_RST}')
+
+        if self.history:
+            entry = self.history[-1]
+            output_buf.append(f'\n  {_DIM}Recent{_RST}')
+            output_buf.append(f'    {_DIM}[{datetime.fromisoformat(entry["timestamp"]).strftime("%H:%M")}]{_RST}  {entry["task"][:50]}')
+
+        output_buf.append(f'\n  {_DIM}Commands{_RST}')
+        output_buf.append(f'    {_GLD}/provider{_RST}  Switch AI provider')
+        output_buf.append(f'    {_GLD}/model{_RST}     Switch AI model')
+        output_buf.append(f'    {_GLD}/resume{_RST}    Resume previous session')
+        output_buf.append('')
+
+        # Create output buffer
+        output_buffer = Buffer(
+            document=Document(output_buf.get_text()),
+            read_only=True,
+        )
+
+        def update_output_display():
+            output_buffer.document = Document(output_buf.get_text())
+            if app_ref[0]:
+                try:
+                    app_ref[0].invalidate()
+                except:
+                    pass
+
+        # Create input buffer with autocomplete
+        input_history = FileHistory(str(SCRIPT_DIR / '.prompt_history'))
+        input_buffer = Buffer(
+            history=input_history,
             auto_suggest=AutoSuggestFromHistory(),
             completer=SlashCompleter(),
             complete_while_typing=True,
-            style=PTStyle.from_dict({
-                'completion-menu.completion': 'bg:#1a1a2e #FFF8DC',
-                'completion-menu.completion.current': 'bg:#FFD700 #1a1a2e bold',
-                'completion-menu.meta.completion': 'bg:#1a1a2e #B8860B',
-                'completion-menu.meta.completion.current': 'bg:#FFBF00 #1a1a2e',
-            }) if USE_COLOR else None,
+            multiline=False,
         )
 
-        first_run = True
-        while True:
-            try:
-                # Show banner
-                if not first_run:
-                    print()
-                _print_banner(provider, model, self.history)
+        # Task queue for communication
+        task_queue = []
+        task_lock = threading.Lock()
 
-                if self.history and not NO_COLOR:
-                    print(f' {_DIM}Recent{_RST}')
-                    entry = self.history[-1]
-                    dt = datetime.fromisoformat(entry['timestamp']).strftime('%H:%M')
-                    print(f'  {_DIM}↳ [{dt}] {entry["task"][:60]}{_RST}')
-                    print()
+        def handle_input_accept(_):
+            task = input_buffer.text.strip()
+            input_buffer.text = ''
+            if task:
+                with task_lock:
+                    task_queue.append(task)
+                update_output_display()
 
-                sessions = _load_sessions(SCRIPT_DIR / 'sessions', limit=1)
-                if sessions:
-                    s = sessions[0]
-                    age = _rel_time(s['ts'])
-                    print(f'  {_GLD}/resume{_RST}  {_DIM}↳ {age}  {s["turns"]}t  {s["task"][:48]}{_RST}')
-                    print()
+        input_buffer.accept_handler = handle_input_accept
 
-                first_run = False
+        # Status bar
+        def get_status_text():
+            s = status.get()
+            if s['agent_running']:
+                agent_marker = f'{_GLD}⚔{_RST}'
+            else:
+                agent_marker = ' '
+            status_line = (
+                f'{agent_marker}  {_GLD}{provider}{_RST}  {_DIM}│{_RST}  '
+                f'{_DIM}{model[:20]:<20}{_RST}  {_DIM}│{_RST}  '
+                f'tokens {_GLD}{s["tokens"]}{_RST}  {_DIM}│{_RST}  '
+                f'{s["context"]}'
+            )
+            return status_line
 
-                # Get input
-                if initial_task:
-                    task = initial_task
-                    initial_task = None
-                    print(f'{_GLD}❯ {_RST}{task}')  # Echo the task
-                else:
-                    task = prompt_session.prompt(f'{_GLD}❯ {_RST}').strip()
+        status_buffer = Buffer(document=Document(get_status_text()), read_only=True)
 
-                if not task:
+        def update_status_display():
+            status_buffer.document = Document(get_status_text())
+            if app_ref[0]:
+                try:
+                    app_ref[0].invalidate()
+                except:
+                    pass
+
+        # Layout
+        layout = Layout(HSplit([
+            # Output area
+            Window(
+                content=BufferControl(
+                    buffer=output_buffer,
+                    focus_on_click=True,
+                    search_buffer_control=None,
+                ),
+                wrap_lines=True,
+                always_hide_cursor=True,
+            ),
+            # Status bar
+            Window(
+                content=BufferControl(
+                    buffer=status_buffer,
+                    focus_on_click=False,
+                ),
+                height=1,
+                dont_extend_height=True,
+            ),
+            # Input
+            Window(
+                content=BufferControl(
+                    buffer=input_buffer,
+                    focus_on_click=True,
+                    input_processors=[],
+                ),
+                height=1,
+                dont_extend_height=True,
+            ),
+        ]))
+
+        style = PTStyle.from_dict({
+            'completion-menu.completion': 'bg:#1a1a2e #FFF8DC',
+            'completion-menu.completion.current': 'bg:#FFD700 #1a1a2e bold',
+            'completion-menu.meta.completion': 'bg:#1a1a2e #B8860B',
+            'completion-menu.meta.completion.current': 'bg:#FFBF00 #1a1a2e',
+        }) if USE_COLOR else None
+
+        app = Application(
+            layout=layout,
+            style=style,
+            full_screen=True,
+            enable_page_navigation_bindings=True,
+        )
+        app_ref[0] = app
+
+        # Task processing loop
+        def process_tasks():
+            nonlocal provider, model
+            while True:
+                with task_lock:
+                    if not task_queue:
+                        task = None
+                    else:
+                        task = task_queue.pop(0)
+
+                if task is None:
+                    import time
+                    time.sleep(0.1)
+                    update_output_display()
+                    update_status_display()
                     continue
 
+                # Handle slash commands
                 if task.lower() == '/provider':
+                    # Exit app, show menu, restart
+                    try:
+                        app.exit()
+                    except:
+                        pass
                     provider_names = list(self.providers.keys())
                     provider_labels = [self.providers[p]['label'] for p in provider_names]
                     provider_descs = [self.providers[p]['desc'] for p in provider_names]
@@ -772,27 +967,82 @@ class MenuSystem:
                     provider = provider_names[provider_idx]
                     model = self._pick_model(provider)
                     _save_config({'provider': provider, 'model': model})
+                    output_buf.append(f'\n  {_GLD}›{_RST} Provider: {_GLD}{provider}{_RST}  {model}')
+                    update_output_display()
+                    update_status_display()
                     continue
 
                 if task.lower() == '/model':
+                    try:
+                        app.exit()
+                    except:
+                        pass
                     model = self._pick_model(provider)
                     _save_config({'provider': provider, 'model': model})
+                    output_buf.append(f'\n  {_GLD}›{_RST} Model: {_GLD}{model}{_RST}')
+                    update_output_display()
+                    update_status_display()
                     continue
 
                 if task.lower().startswith('/resume'):
+                    try:
+                        app.exit()
+                    except:
+                        pass
                     follow_up = task[7:].strip()
                     self._pick_session(follow_up_task=follow_up)
                     return
 
-                # Execute agent
+                # Execute agent in background
                 self._save_history(provider, model, task)
                 _save_config({'provider': provider, 'model': model})
-                print(f'\n{_GLD}⚔ bash{_RST}\n')
-                self._execute_agent(provider, model, task)
 
-            except KeyboardInterrupt:
-                print(f'\n {_DIM}quit{_RST}')
-                return
+                output_buf.append(f'\n  {_GLD}⚔ bash{_RST}')
+                status.update(agent_running=True, turns=0, tokens=0)
+                update_output_display()
+                update_status_display()
+
+                # Run agent in thread
+                def run_agent_bg():
+                    import sys as _sys
+                    old_stdout = _sys.stdout
+                    old_stderr = _sys.stderr
+                    try:
+                        # Capture output
+                        capture = io.StringIO()
+                        _sys.stdout = capture
+                        _sys.stderr = capture
+
+                        self._execute_agent(provider, model, task)
+
+                        # Get captured output
+                        output_buf.append(capture.getvalue())
+                    finally:
+                        _sys.stdout = old_stdout
+                        _sys.stderr = old_stderr
+                        status.update(agent_running=False)
+                        update_output_display()
+                        update_status_display()
+
+                agent_thread = threading.Thread(target=run_agent_bg, daemon=True)
+                agent_thread.start()
+
+        # Run task processor in background
+        processor_thread = threading.Thread(target=process_tasks, daemon=True)
+        processor_thread.start()
+
+        # Queue initial task if provided
+        if initial_task:
+            with task_lock:
+                task_queue.append(initial_task)
+
+        # Run application
+        try:
+            app.run()
+        except KeyboardInterrupt:
+            pass
+        except Exception as e:
+            pass
 
     def _run_fallback(self, provider, model, initial_task=None):
         """Fallback to raw terminal input without fixed input area."""
