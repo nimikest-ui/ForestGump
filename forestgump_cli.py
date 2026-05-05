@@ -595,7 +595,7 @@ class ForestGumpCLI:
         """Start a chat session with memory context injection."""
         # Try to import MemoryManager if available
         try:
-            from forestgump.memory import MemoryManager
+            from memory import MemoryManager
         except (ImportError, ModuleNotFoundError):
             MemoryManager = None
         
@@ -675,12 +675,14 @@ class ForestGumpCLI:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": args.query}
             ]
-            session["memory_snapshot"] = {
-                "facts": memory.memory.list_facts(),
-                "credentials": [c.to_dict() for c in memory.memory.credentials],
-                "networks": list(memory.memory.networks.keys()),
-                "notes": memory.memory.list_notes(),
-            }
+            if memory:
+                session["memory_snapshot"] = {
+                    "facts": memory.memory.get("facts", []),
+                    "credentials": memory.memory.get("credentials", {}),
+                    "networks": list(memory.memory.get("networks", {}).keys()),
+                    "notes": memory.memory.get("notes", []),
+                }
+                memory.save()
             self.sessions.save_session(args.query, provider, model, session.get("messages", []))
             return
         
