@@ -863,18 +863,25 @@ class MenuSystem:
 
         input_buffer.accept_handler = handle_input_accept
 
-        # Status bar
+        # Status bar with progress indicator
         def get_status_text():
             s = status.get()
             if s['agent_running']:
                 agent_marker = f'{_GLD}⚔{_RST}'
+                spinner = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'][int(__import__('time').time() * 4) % 8]
+                progress = f'  {spinner}'
             else:
                 agent_marker = ' '
+                progress = ''
+
+            # Format model name (truncate if too long)
+            model_display = model[:16].ljust(16)
+
             status_line = (
-                f'{agent_marker}  {_GLD}{provider}{_RST}  {_DIM}│{_RST}  '
-                f'{_DIM}{model[:20]:<20}{_RST}  {_DIM}│{_RST}  '
-                f'tokens {_GLD}{s["tokens"]}{_RST}  {_DIM}│{_RST}  '
-                f'{s["context"]}'
+                f'{agent_marker}{progress}  {_GLD}{provider:<8}{_RST}  {_DIM}│{_RST}  '
+                f'{_DIM}{model_display}{_RST}  {_DIM}│{_RST}  '
+                f'{_GLD}{s["turns"]:2d}{_RST}t  {_DIM}│{_RST}  '
+                f'{_GLD}{s["tokens"]:5d}{_RST} tokens'
             )
             return status_line
 
