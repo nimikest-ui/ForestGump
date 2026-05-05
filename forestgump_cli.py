@@ -104,7 +104,7 @@ class ModelDiscovery:
 class ProviderManager:
     """Manage provider configuration and detection."""
     
-    PROVIDERS = [\"copilot\", \"claude\", \"anthropic\", \"ollama\", \"groq\"]
+    PROVIDERS = ["copilot", "claude", "anthropic", "ollama", "groq"]
     
     def __init__(self):
         self.config_dir = Path.home() / ".forestgump"
@@ -120,7 +120,7 @@ class ProviderManager:
                     return json.load(f)
             except Exception:
                 pass
-        return {\"provider\": \"copilot\", \"model\": \"claude-haiku-4-5\"}
+        return {"provider": "copilot", "model": "claude-haiku-4-5"}
     
     def _save_config(self):
         """Save configuration to file."""
@@ -144,11 +144,11 @@ class ProviderManager:
     
     def get_provider(self) -> str:
         """Get default provider from config."""
-        return self.config.get(\"provider\", \"copilot\")
+        return self.config.get("provider", "copilot")
     
     def get_model(self) -> str:
         """Get default model from config."""
-        return self.config.get(\"model\", \"claude-haiku-4-5\")
+        return self.config.get("model", "claude-haiku-4-5")
     
     def detect_api_keys(self) -> Dict[str, bool]:
         """Detect which providers have API keys or are available."""
