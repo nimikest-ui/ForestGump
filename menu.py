@@ -19,6 +19,7 @@ from datetime import datetime
 try:
     from prompt_toolkit import PromptSession, Application
     from prompt_toolkit.layout import Layout, HSplit, Window, WindowAlign
+    from prompt_toolkit.layout.controls import BufferControl
     from prompt_toolkit.widgets import TextArea
     from prompt_toolkit.document import Document
     from prompt_toolkit.buffer import Buffer
@@ -28,8 +29,9 @@ try:
     from prompt_toolkit.styles import Style as PTStyle
     from prompt_toolkit.patch_stdout import patch_stdout
     _PT_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     _PT_AVAILABLE = False
+    Completer = None  # Define stub so class definition doesn't fail
 
 try:
     from rich.console import Console
@@ -130,14 +132,20 @@ FOREST_GUMP_LOGO = """[bold #FFD700]███████╗ ██████�
 [#B8860B]╚═╝      ╚═════╝ ╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝[/]"""
 
 
-class SlashCompleter(Completer):
-    """prompt_toolkit Completer for slash commands."""
-    def get_completions(self, document, complete_event):
-        text = document.text_before_cursor
-        if text.startswith('/'):
-            for cmd, desc in SLASH_COMMANDS:
-                if cmd.startswith(text):
-                    yield Completion(cmd[len(text):], display=cmd, display_meta=desc)
+if _PT_AVAILABLE and Completer:
+    class SlashCompleter(Completer):
+        """prompt_toolkit Completer for slash commands."""
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor
+            if text.startswith('/'):
+                for cmd, desc in SLASH_COMMANDS:
+                    if cmd.startswith(text):
+                        yield Completion(cmd[len(text):], display=cmd, display_meta=desc)
+else:
+    class SlashCompleter:
+        """Stub completer when prompt_toolkit unavailable."""
+        def get_completions(self, document, complete_event):
+            return []
 
 
 def _print_banner(provider, model, history):
