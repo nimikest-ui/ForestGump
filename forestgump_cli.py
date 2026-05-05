@@ -21,6 +21,9 @@ from providers import (
     CopilotProvider,
 )
 
+# Import tool sandbox
+from toolsandbox import Sandbox, CommandParser, CommandFilter
+
 # ANSI colors
 CYAN = "\033[96m"
 GREEN = "\033[92m"
@@ -273,8 +276,8 @@ class SessionManager:
 
 class InteractiveREPL:
     """Interactive REPL for ForestGump chat sessions."""
-    
-    def __init__(self, provider, model: str, provider_name: str, session_dir: Path = None, session_id: str = None):
+    def __init__(self, provider, model: str, provider_name: str, session_dir: Path = None, session_id: str = None, yolo: bool = False, memory=None, system_prompt: str = None):
+        
         """
         Initialize the interactive REPL.
         
@@ -284,6 +287,9 @@ class InteractiveREPL:
             provider_name: Provider name (groq, claude, etc.)
             session_dir: Directory for session storage
             session_id: Optional existing session ID to resume
+            yolo: If True, skip command confirmations (dangerous!)
+            memory: Optional MemoryManager instance for session context
+            system_prompt: Optional system prompt with memory context
         """
         self.provider = provider
         self.model = model
@@ -294,6 +300,12 @@ class InteractiveREPL:
         self.session_id = session_id or None
         self.conversation_history = []
         self.task_description = ""
+        self.memory = memory
+        self.system_prompt = system_prompt
+        
+        # Initialize tool sandbox for command parsing and execution
+        self.sandbox = Sandbox(timeout=30, yolo=yolo)
+        self.command_filter = CommandFilter()
         
         # Load existing session if provided
         if session_id:
@@ -489,6 +501,69 @@ Type regular messages to chat. Messages are automatically saved after each turn.
         """Format error message with color."""
         return f"{RED}Error: {content}{RESET}"
     
+    def extract_and_handle_commands(self, response: str) -> str:
+        """
+        Extract commands from response and prompt user for execution.
+        
+        Args:
+            response: Assistant response text
+            
+        Returns:
+            Feedback text about command execution (if any)
+        """
+        commands = self.sandbox.parse_response(response)
+        if not commands:
+            return ""
+        
+        # Filter and prioritize
+        commands = self.command_filter.filter_commands(commands)
+        commands = self.command_filter.prioritize_commands(commands)
+        
+        if not commands:
+            return ""
+        
+        # Validate commands
+        validation = self.command_filter.validate_commands(commands)
+        
+        # Show summary
+        print(f"\n{Colors.warning('[*]')} Found {len(commands)} command(s) in response")
+        
+        feedback_parts = []
+        
+        # Handle safe commands
+        for cmd_info in validation['safe']:
+            cmd = cmd_info['command']
+            success, output = self.sandbox.execute_and_feedback(cmd)
+            feedback_parts.append(f"SAFE: {cmd}\n{output}")
+            if success:
+                print(f"{Colors.success('[+]')} Executed safe command")
+            else:
+                print(f"{Colors.error('[!]')} Safe command failed: {output[:100]}")
+        
+        # Handle dangerous commands - requires user confirmation
+        for cmd_info in validation['dangerous']:
+            cmd = cmd_info['command']
+            reason = cmd_info['reason']
+            print(f"{Colors.error('[!]')} DANGEROUS: {cmd}")
+            print(f"    Reason: {reason}")
+            feedback_parts.append(f"BLOCKED (dangerous): {cmd}\n{reason}")
+        
+        # Handle unknown commands - ask user
+        for cmd_info in validation['unknown']:
+            cmd = cmd_info['command']
+            conf = cmd_info['confidence']
+            print(f"{Colors.warning('[?]')} UNKNOWN (confidence: {conf:.1%}): {cmd}")
+            if self.sandbox.confirm_execution(cmd):
+                success, output = self.sandbox.execute_and_feedback(cmd)
+                feedback_parts.append(f"UNKNOWN: {cmd}\n{output}")
+                if success:
+                    print(f"{Colors.success('[+]')} Executed unknown command")
+                else:
+                    print(f"{Colors.error('[!]')} Unknown command failed")
+        
+        return "\n".join(feedback_parts)
+    
+    
     def print_welcome(self):
         """Print welcome banner."""
         print(f"\n{Colors.info('╔════════════════════════════════════════╗')}")
@@ -556,8 +631,19 @@ Type regular messages to chat. Messages are automatically saved after each turn.
                     try:
                         print(f"{Colors.warning('[*]')} Thinking...", end="", flush=True)
                         
-                        # Call provider's chat method with full history
-                        response = self.provider.chat(user_input, self.conversation_history)
+                        # Build messages list for provider API
+                        # Include system prompt if available, then conversation history
+                        messages = []
+                        if self.system_prompt:
+                            messages.append({"role": "system", "content": self.system_prompt})
+                        
+                        # Add conversation history (skip any system messages already added)
+                        for msg in self.conversation_history:
+                            if msg.get("role") != "system" or not self.system_prompt:
+                                messages.append(msg)
+                        
+                        # Call provider's chat method with formatted messages
+                        response = self.provider.chat(messages, self.system_prompt)
                         
                         print("\r", end="")  # Clear the "Thinking..." line
                         print(self.format_assistant_message(response))
@@ -566,12 +652,29 @@ Type regular messages to chat. Messages are automatically saved after each turn.
                         # Add response to history
                         self.append_message("assistant", response)
                         
+                        # Extract and handle commands from response
+                        cmd_feedback = self.extract_and_handle_commands(response)
+                        if cmd_feedback:
+                            print(f"\n{Colors.info('[*]')} Command execution feedback:")
+                            print(cmd_feedback)
+                            print()
+                        
                         # Auto-save after each turn
                         self.save_session()
                         
-                    except Exception as e:
+                    except subprocess.TimeoutExpired:
+                        print("\r", end="")  # Clear the "Thinking..." line
+                        error_msg = f"Request timed out (30 seconds). Please try again."
+                        print(self.format_error_message(error_msg))
+                        print()
+                    except RuntimeError as e:
                         print("\r", end="")  # Clear the "Thinking..." line
                         error_msg = f"Provider error: {str(e)}"
+                        print(self.format_error_message(error_msg))
+                        print()
+                    except Exception as e:
+                        print("\r", end="")  # Clear the "Thinking..." line
+                        error_msg = f"Unexpected error: {str(e)}"
                         print(self.format_error_message(error_msg))
                         print()
                         
@@ -654,27 +757,61 @@ class ForestGumpCLI:
         else:
             system_prompt = None
         
+        # Create real provider instance
+        real_provider = self.providers.create_provider(provider)
+        if not real_provider:
+            print(f"{Colors.error('[!]')} Failed to initialize provider: {provider}")
+            print(f"{Colors.warning('[*]')} Falling back to demo mode\n")
+            real_provider = self._create_mock_provider(provider, model)
+        elif not real_provider.is_available:
+            print(f"{Colors.warning('[!]')} Provider {provider} not available")
+            print(f"{Colors.warning('[*]')} Falling back to demo mode\n")
+            real_provider = self._create_mock_provider(provider, model)
+        
         # Handle single query mode
         if args.query:
             if not args.quiet:
-                print(f"{Colors.info('[*]')} Processing query (demo mode)...\n")
+                print(f"{Colors.info('[*]')} Processing query...\n")
             
-            # In a real implementation, here we would:
-            # 1. Call provider.chat(system_prompt, args.query)
-            # 2. Parse response for [MEMORY UPDATE] blocks
-            # 3. Apply updates to memory
-            # 4. Save updated session
+            # Build messages list for provider
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": args.query})
             
-            print(f"{Colors.info('[*]')} Response would be displayed here.\n")
-            context_size = len(memory.get_context())
-            if context_size > 0:
-                print(f"{Colors.info('[*]')} System prompt includes memory context of {context_size} chars\n")
+            # Call provider with error handling
+            try:
+                if not args.quiet:
+                    print(f"{Colors.info('[*]')} Waiting for response from {provider}...")
+                
+                response = real_provider.chat(messages, system_prompt)
+                
+                if not response:
+                    print(f"{Colors.error('[!]')} Provider returned empty response\n")
+                    return
+                
+                if not args.quiet:
+                    print()  # Newline after status message
+                
+                print(f"{GREEN}Response:{RESET}")
+                print(response)
+                print()
+                
+            except subprocess.TimeoutExpired:
+                print(f"\r{Colors.error('[!]')} Request timed out (30 seconds). Please try again.\n")
+                return
+            except RuntimeError as e:
+                error_msg = str(e)
+                print(f"\r{Colors.error('[!]')} Provider error: {error_msg}\n")
+                if "not available" in error_msg.lower():
+                    print(f"{Colors.warning('[*]')} Tip: Check that {provider} is properly configured\n")
+                return
+            except Exception as e:
+                print(f"\r{Colors.error('[!]')} Unexpected error: {str(e)}\n")
+                return
             
             # Save session with memory snapshot
-            session["messages"] = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": args.query}
-            ]
+            session["messages"] = messages
             if memory:
                 session["memory_snapshot"] = {
                     "facts": memory.memory.get("facts", []),
@@ -686,17 +823,17 @@ class ForestGumpCLI:
             self.sessions.save_session(args.query, provider, model, session.get("messages", []))
             return
         
-        # Interactive mode - create mock provider for now
-        # In production, this would be a real provider instance
-        mock_provider = self._create_mock_provider(provider, model)
-        
+        # Interactive mode - use real provider
         # Enter interactive REPL
         repl = InteractiveREPL(
-            provider=mock_provider,
+            provider=real_provider,
             model=model,
             provider_name=provider,
             session_dir=self.sessions.sessions_dir,
-            session_id=session_id
+            session_id=session_id,
+            yolo=args.yolo,
+            memory=memory,
+            system_prompt=system_prompt
         )
         repl.run()
     
