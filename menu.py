@@ -1464,10 +1464,10 @@ class MenuSystem:
                     cols3 = 80
                 max_task = max(10, cols3 - 4)
                 task_display = current_task[:max_task] + ('…' if len(current_task) > max_task else '')
-                mission = f' {_GLD}◈{_RST} {_BLD}{task_display}{_RST}'
+                mission = f' ◈ {task_display}'
             else:
-                mission = f' {_GLD}◈{_RST} {_DIM}ForestGump — ready{_RST}'
-            stats = f' {_GLD}⚕{_RST}  {_AMB}{model_display}{_RST} │ 100K/400K │ [██░░░░░░░░] 25% │ {_DIM}{time_str}{_RST}'
+                mission = ' ◈ ForestGump — ready'
+            stats = f' ⚕ {model_display} │ 100K/400K │ [██░░░░░░░░] 25% │ {time_str}'
             return mission, stats
 
         def _draw_slash_picker():
@@ -1477,7 +1477,7 @@ class MenuSystem:
             out.write('\033[J')  # Clear from cursor to end of screen
             out.write('\n' + '─' * min(cols, 80) + '\n')
             for i, (cmd, desc) in enumerate(filtered):
-                marker = f'{_GLD}▶{_RST} ' if i == slash_picker_idx % max(1, len(filtered)) else '  '
+                marker = '▶ ' if i == slash_picker_idx % max(1, len(filtered)) else '  '
                 out.write(f' {marker}{cmd:<36} {desc[:max(10, cols-42)]}\n')
             out.flush()
 
@@ -1488,8 +1488,7 @@ class MenuSystem:
                 rows2, _ = os.get_terminal_size()
             except OSError:
                 rows2 = 24
-            prompt = f' {_GLD}❯{_RST} {current_input}'
-            out.write('\033[{};1H'.format(rows2)); out.write('\033[2K'); out.write(prompt)
+            out.write('\033[{};1H'.format(rows2)); out.write('\033[2K'); out.write(' ❯ ' + current_input)
             out.flush()
 
         def redisplay_screen():
@@ -1506,8 +1505,7 @@ class MenuSystem:
             mission_line, stats_line = get_status_lines()
             out.write('\033[{};1H'.format(rows-3)); out.write('\033[2K'); out.write(mission_line)
             out.write('\033[{};1H'.format(rows-2)); out.write('\033[2K'); out.write(stats_line)
-            prompt = f' {_GLD}❯{_RST} {current_input}'
-            out.write('\033[{};1H'.format(rows)); out.write('\033[2K'); out.write(prompt)
+            out.write('\033[{};1H'.format(rows)); out.write('\033[2K'); out.write(' ❯ ' + current_input)
             if slash_picker_active:
                 _draw_slash_picker()
             out.flush()
