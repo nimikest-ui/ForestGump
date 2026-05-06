@@ -1584,27 +1584,82 @@ class MenuSystem:
                 m, s = get_status_lines(); add_output(m); add_output(s)
             elif c == '/skills':
                 add_output('')
-                cmd_skills(type('args', (), {'search': None, 'list': True})())
+                import io as _io
+                old_stdout = sys.stdout
+                sys.stdout = _io.StringIO()
+                try:
+                    cmd_skills(type('args', (), {'search': None, 'list': True})())
+                    output = sys.stdout.getvalue()
+                    for line in output.split('\n'):
+                        if line:
+                            add_output(line)
+                finally:
+                    sys.stdout = old_stdout
                 add_output(f'\n{_DIM}(Press Enter to continue){_RST}')
             elif c == '/memory':
                 add_output('')
-                cmd_memory(type('args', (), {'search': None, 'list': True, 'summary': False})())
+                old_stdout = sys.stdout
+                sys.stdout = _io.StringIO()
+                try:
+                    cmd_memory(type('args', (), {'search': None, 'list': True, 'summary': False})())
+                    output = sys.stdout.getvalue()
+                    for line in output.split('\n'):
+                        if line:
+                            add_output(line)
+                finally:
+                    sys.stdout = old_stdout
                 add_output(f'\n{_DIM}(Press Enter to continue){_RST}')
             elif c == '/sessions':
                 add_output('')
-                cmd_sessions(type('args', (), {'list': True, 'resume': None})())
+                old_stdout = sys.stdout
+                sys.stdout = _io.StringIO()
+                try:
+                    cmd_sessions(type('args', (), {'list': True, 'resume': None})())
+                    output = sys.stdout.getvalue()
+                    for line in output.split('\n'):
+                        if line:
+                            add_output(line)
+                finally:
+                    sys.stdout = old_stdout
                 add_output(f'\n{_DIM}(Press Enter to continue){_RST}')
             elif c == '/monitor':
                 add_output('')
-                cmd_monitor(type('args', (), {'dashboard': True, 'hours': '24', 'reset': False})())
+                old_stdout = sys.stdout
+                sys.stdout = _io.StringIO()
+                try:
+                    cmd_monitor(type('args', (), {'dashboard': True, 'hours': '24', 'reset': False})())
+                    output = sys.stdout.getvalue()
+                    for line in output.split('\n'):
+                        if line:
+                            add_output(line)
+                finally:
+                    sys.stdout = old_stdout
                 add_output(f'\n{_DIM}(Press Enter to continue){_RST}')
             elif c == '/subagents':
                 add_output('')
-                cmd_subagents(type('args', (), {'status': True, 'list': False})())
+                old_stdout = sys.stdout
+                sys.stdout = _io.StringIO()
+                try:
+                    cmd_subagents(type('args', (), {'status': True, 'list': False})())
+                    output = sys.stdout.getvalue()
+                    for line in output.split('\n'):
+                        if line:
+                            add_output(line)
+                finally:
+                    sys.stdout = old_stdout
                 add_output(f'\n{_DIM}(Press Enter to continue){_RST}')
             elif c == '/memory-advanced':
                 add_output('')
-                cmd_memory_advanced(type('args', (), {'stats': True, 'high_confidence': False, 'unused': False})())
+                old_stdout = sys.stdout
+                sys.stdout = _io.StringIO()
+                try:
+                    cmd_memory_advanced(type('args', (), {'stats': True, 'high_confidence': False, 'unused': False})())
+                    output = sys.stdout.getvalue()
+                    for line in output.split('\n'):
+                        if line:
+                            add_output(line)
+                finally:
+                    sys.stdout = old_stdout
                 add_output(f'\n{_DIM}(Press Enter to continue){_RST}')
             elif c == '/quit':
                 exit_requested = True
