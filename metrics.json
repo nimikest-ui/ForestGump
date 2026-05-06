@@ -12,5 +12,33 @@
     "commands_executed": 0,
     "success": true,
     "error_message": null
+  },
+  {
+    "session_id": "s1",
+    "task": "task",
+    "provider": "claude",
+    "model": "haiku",
+    "start_time": 1778043953.8288975,
+    "end_time": 1778043953.8289196,
+    "duration_seconds": 2.2172927856445312e-05,
+    "total_turns": 3,
+    "tokens_used": 100,
+    "commands_executed": 0,
+    "success": true,
+    "error_message": null
+  },
+  {
+    "session_id": "s1",
+    "task": "task",
+    "provider": "claude",
+    "model": "haiku",
+    "start_time": 1778044041.9889429,
+    "end_time": 1778044041.9889545,
+    "duration_seconds": 1.1682510375976562e-05,
+    "total_turns": 3,
+    "tokens_used": 100,
+    "commands_executed": 0,
+    "success": true,
+    "error_message": null
   }
 ]

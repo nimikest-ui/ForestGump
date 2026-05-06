@@ -164,9 +164,14 @@ class Panel:
         if not self.border:
             return '\n'.join(self.lines)
 
-        # Simple border
-        title_str = f' {self.title} ' if self.title else ''
-        top = self.color + '┌' + '─' * (width - 2) + '┐' + theme.Colors.RESET
+        # Simple border with title
+        if self.title:
+            title_str = f' {self.title} '
+            border_width = width - len(title_str) - 2
+            top = self.color + '┌' + title_str + '─' * max(0, border_width) + '┐' + theme.Colors.RESET
+        else:
+            top = self.color + '┌' + '─' * (width - 2) + '┐' + theme.Colors.RESET
+
         bottom = self.color + '└' + '─' * (width - 2) + '┘' + theme.Colors.RESET
 
         content = []
