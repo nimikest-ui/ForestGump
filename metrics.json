@@ -1,0 +1,16 @@
+[
+  {
+    "session_id": "s1",
+    "task": "task",
+    "provider": "claude",
+    "model": "haiku",
+    "start_time": 1778043795.2859921,
+    "end_time": 1778043795.286004,
+    "duration_seconds": 1.1920928955078125e-05,
+    "total_turns": 5,
+    "tokens_used": 0,
+    "commands_executed": 0,
+    "success": true,
+    "error_message": null
+  }
+]

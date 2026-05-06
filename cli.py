@@ -353,6 +353,107 @@ def cmd_schedule(args):
     return 0
 
 
+def cmd_monitor(args):
+    """View monitoring and metrics dashboard."""
+    from monitor import get_collector
+
+    collector = get_collector()
+
+    if args.dashboard:
+        hours = int(args.hours) if args.hours else 24
+        print(collector.print_dashboard(hours=hours))
+        return 0
+
+    if args.reset:
+        # Clear metrics
+        from pathlib import Path
+        metrics_file = Path(__file__).parent / 'metrics.json'
+        if metrics_file.exists():
+            metrics_file.unlink()
+        print(success('✓ Metrics cleared'))
+        return 0
+
+    return 0
+
+
+def cmd_subagents(args):
+    """Manage subagent tasks."""
+    from subagent import get_manager
+
+    manager = get_manager()
+
+    if args.status:
+        print(manager.print_status())
+        return 0
+
+    if args.list:
+        print(banner('\n🤖 Subagent Tasks'))
+        tasks = manager.list_tasks()
+
+        if not tasks:
+            print(info('  No subagent tasks yet.'))
+            return 0
+
+        for task in tasks:
+            status_icon = {
+                'pending': '⏳',
+                'running': '🏃',
+                'completed': '✅',
+                'failed': '❌',
+                'timeout': '⏱️',
+                'cancelled': '⛔',
+            }.get(task.status, '❓')
+
+            print(
+                f'  {status_icon} {task.id}: {task.description[:40]}... '
+                f'[{task.status}]'
+            )
+        return 0
+
+    return 0
+
+
+def cmd_memory_advanced(args):
+    """Advanced memory search and statistics."""
+    from memory_search import AdvancedMemorySearch
+
+    search = AdvancedMemorySearch()
+
+    if args.stats:
+        print(search.print_stats())
+        return 0
+
+    if args.high_confidence:
+        print(banner('\n🧠 High Confidence Memories'))
+        results = search.search_high_confidence(min_confidence=0.8, limit=10)
+
+        for result in results:
+            print(f'\n  [{result.type.upper()}] Confidence: {result.confidence:.0%}')
+            content = (
+                result.content[:70] + '...'
+                if len(result.content) > 70
+                else result.content
+            )
+            print(f'    {content}')
+        return 0
+
+    if args.unused:
+        print(banner('\n🧠 Unused Memories (30+ days)'))
+        results = search.search_unused(days_since_use=30, limit=10)
+
+        for result in results:
+            print(f'\n  [{result.type.upper()}]')
+            content = (
+                result.content[:70] + '...'
+                if len(result.content) > 70
+                else result.content
+            )
+            print(f'    {content}')
+        return 0
+
+    return 0
+
+
 def cmd_version(args):
     """Show version information."""
     print(f'ForestGump v{__version__} (Hermes-compatible pentesting agent)')
@@ -423,6 +524,28 @@ def main():
     schedule_parser.add_argument('--list', action='store_true', help='List scheduled tasks')
     schedule_parser.add_argument('--add', help='Add task: "name|schedule|task"')
     schedule_parser.set_defaults(func=cmd_schedule)
+
+    # monitor
+    monitor_parser = subparsers.add_parser('monitor', help='View metrics and monitoring')
+    monitor_parser.add_argument('--dashboard', action='store_true', help='Show metrics dashboard')
+    monitor_parser.add_argument('--hours', default='24', help='Hours of history (default: 24)')
+    monitor_parser.add_argument('--reset', action='store_true', help='Clear metrics')
+    monitor_parser.set_defaults(func=cmd_monitor)
+
+    # subagents
+    subagents_parser = subparsers.add_parser('subagents', help='Manage subagent tasks')
+    subagents_parser.add_argument('--status', action='store_true', help='Show subagent status')
+    subagents_parser.add_argument('--list', action='store_true', help='List subagent tasks')
+    subagents_parser.set_defaults(func=cmd_subagents)
+
+    # memory (advanced search)
+    memory_adv_parser = subparsers.add_parser('memory-advanced', help='Advanced memory search')
+    memory_adv_parser.add_argument('--stats', action='store_true', help='Show memory statistics')
+    memory_adv_parser.add_argument(
+        '--high-confidence', action='store_true', help='Show high confidence memories'
+    )
+    memory_adv_parser.add_argument('--unused', action='store_true', help='Show unused memories')
+    memory_adv_parser.set_defaults(func=cmd_memory_advanced)
 
     # version
     version_parser = subparsers.add_parser('version', help='Show version')
