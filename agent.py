@@ -2052,8 +2052,8 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
     save_memory(mem)
 
     # ── Extract skills from successful session ──
-    outcome = 'success' if turn_count > 0 else 'abandoned'
-    extract_skills_from_session(messages, mem, session_id, provider, outcome=outcome, is_haiku=is_haiku)
+    session_data = {'messages': messages}
+    extract_skills_from_session(session_data)
 
     # ── Print token usage summary ──
     if token_totals['input_tokens'] > 0 or token_totals['output_tokens'] > 0:
