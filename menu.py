@@ -122,12 +122,19 @@ def _get_local_ollama_models():
 _BLU = '\033[38;5;33m' if USE_COLOR else ''
 
 SLASH_COMMANDS = [
-    ('/provider', 'switch AI provider — saved'),
-    ('/model',    'switch AI model — saved'),
-    ('/resume',   'resume a previous session'),
+    ('/chat',              'start chat session'),
+    ('/skills',            'browse learned skills'),
+    ('/memory',            'search/list memory'),
+    ('/sessions',          'list recent sessions'),
+    ('/monitor',           'show metrics dashboard'),
+    ('/subagents',         'show subagent status'),
+    ('/memory-advanced',   'advanced memory search'),
+    ('/provider',          'switch AI provider — saved'),
+    ('/model',             'switch AI model — saved'),
+    ('/resume',            'resume previous session'),
 ]
 _MAX_DROP  = len(SLASH_COMMANDS)
-_CMD_WIDTH = 12  # fixed left column width for slash command names
+_CMD_WIDTH = 18  # fixed left column width for slash command names
 
 
 def _hr():
@@ -1850,7 +1857,53 @@ class MenuSystem:
             if not task:
                 continue
 
-            if task.lower() == '/provider':
+            # Handle slash commands
+            task_lower = task.lower()
+
+            if task_lower == '/chat':
+                print(f' {_GLD}Task:{_RST} ', end='', flush=True)
+                chat_task = input().strip()
+                if chat_task:
+                    self._save_history(provider, model, chat_task)
+                    _save_config({'provider': provider, 'model': model})
+                    self._execute_agent(provider, model, chat_task)
+                continue
+
+            if task_lower == '/skills':
+                print(f' {_GLD}Search (or press Enter for list):{_RST} ', end='', flush=True)
+                search_term = input().strip()
+                if search_term:
+                    cmd_skills(type('args', (), {'search': search_term, 'list': False})())
+                else:
+                    cmd_skills(type('args', (), {'search': None, 'list': True})())
+                continue
+
+            if task_lower == '/memory':
+                print(f' {_GLD}Search (or press Enter for list):{_RST} ', end='', flush=True)
+                search_term = input().strip()
+                if search_term:
+                    cmd_memory(type('args', (), {'search': search_term, 'list': False, 'summary': False})())
+                else:
+                    cmd_memory(type('args', (), {'search': None, 'list': True, 'summary': False})())
+                continue
+
+            if task_lower == '/sessions':
+                cmd_sessions(type('args', (), {'list': True, 'resume': None})())
+                continue
+
+            if task_lower == '/monitor':
+                cmd_monitor(type('args', (), {'dashboard': True, 'hours': '24', 'reset': False})())
+                continue
+
+            if task_lower == '/subagents':
+                cmd_subagents(type('args', (), {'status': True, 'list': False})())
+                continue
+
+            if task_lower == '/memory-advanced':
+                cmd_memory_advanced(type('args', (), {'stats': True, 'high_confidence': False, 'unused': False})())
+                continue
+
+            if task_lower == '/provider':
                 provider_names  = list(self.providers.keys())
                 provider_labels = [self.providers[p]['label'] for p in provider_names]
                 provider_descs  = [self.providers[p]['desc']  for p in provider_names]
@@ -1860,16 +1913,17 @@ class MenuSystem:
                 _save_config({'provider': provider, 'model': model})
                 continue
 
-            if task.lower() == '/model':
+            if task_lower == '/model':
                 model = self._pick_model(provider)
                 _save_config({'provider': provider, 'model': model})
                 continue
 
-            if task.lower().startswith('/resume'):
+            if task_lower.startswith('/resume'):
                 follow_up = task[7:].strip()
                 self._pick_session(follow_up_task=follow_up)
                 return
 
+            # Regular chat task
             self._save_history(provider, model, task)
             _save_config({'provider': provider, 'model': model})
             self._execute_agent(provider, model, task)
