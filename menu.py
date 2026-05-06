@@ -1830,7 +1830,8 @@ class MenuSystem:
             self._execute_agent(provider, model, task)
 
 
-if __name__ == '__main__':
+def main():
+    """Main entry point for CLI/interactive mode."""
     parser = argparse.ArgumentParser(
         prog='forestgump',
         description='Hermes-compatible bare-metal pentesting agent',
@@ -1924,18 +1925,17 @@ if __name__ == '__main__':
 
     # If --version flag or no command, show version or run interactive menu
     if args.version or (not args.command and '--version' in sys.argv):
-        sys.exit(cmd_version(args))
+        return cmd_version(args)
 
     # If a command was specified, run it
     if args.command and hasattr(args, 'func'):
-        sys.exit(args.func(args))
+        return args.func(args)
 
     # Otherwise, run interactive menu
     menu = MenuSystem()
-    cfg = _load_config()
-    if cfg.get('provider') in menu.providers:
-        default_provider = cfg['provider']
-    else:
-        default_provider = 'claude'
-
     menu.run(initial_task=None)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

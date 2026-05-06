@@ -55,7 +55,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'forestgump=cli:main',
+            'forestgump=menu:main',
         ],
     },
     classifiers=[
