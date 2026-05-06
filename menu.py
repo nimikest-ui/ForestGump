@@ -188,12 +188,13 @@ def _print_banner(provider, model, history):
     ))
 
 
-def _readline_slash(timeout_seconds=3, on_timeout=None):
+def _readline_slash(timeout_seconds=3, on_timeout=None, history=None):
     """Custom input with timeout: typing '/' shows autocomplete dropdown (unless COLOR=1).
 
     Args:
         timeout_seconds: Timeout in seconds before returning None (triggers redraw)
         on_timeout: Optional callback function to call when timeout occurs
+        history: Optional list of previous commands for history navigation
     """
     import re as _re
 
@@ -211,9 +212,14 @@ def _readline_slash(timeout_seconds=3, on_timeout=None):
         except Exception:
             return input()
 
+    if history is None:
+        history = []
+
     buf          = []
     drop_sel     = -1
     prev_lines   = 0
+    cursor_pos   = 0
+    hist_idx     = len(history)  # Start at end of history (new input)
 
     fd  = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
@@ -293,10 +299,16 @@ def _readline_slash(timeout_seconds=3, on_timeout=None):
                 matches  = [(c, d) for c, d in SLASH_COMMANDS if c.startswith(text)] if is_slash else []
                 if drop_sel >= 0 and drop_sel < len(matches):
                     buf[:] = list(matches[drop_sel][0])
+
+                result = ''.join(buf)
+                # Add to history if not empty
+                if result and (not history or history[-1] != result):
+                    history.append(result)
+
                 _clear_drop()
                 sys.stdout.write('\n')
                 sys.stdout.flush()
-                return ''.join(buf)
+                return result
 
             elif ch in ('\x7f', '\x08'):  # backspace
                 if buf:
@@ -315,11 +327,32 @@ def _readline_slash(timeout_seconds=3, on_timeout=None):
                     text     = ''.join(buf)
                     is_slash = text.startswith('/')
                     matches  = [(c, d) for c, d in SLASH_COMMANDS if c.startswith(text)] if is_slash else []
-                    if arrow == 'B' and matches:   # ↓
-                        drop_sel = min(len(matches) - 1, drop_sel + 1)
+
+                    if arrow == 'A':  # Up arrow
+                        if matches and drop_sel >= 0:  # In dropdown mode
+                            drop_sel = max(-1, drop_sel - 1)
+                            _render()
+                        else:  # History navigation
+                            if hist_idx > 0:
+                                hist_idx -= 1
+                                buf[:] = list(history[hist_idx] if hist_idx < len(history) else '')
+                                cursor_pos = len(buf)
+                                _render()
+                    elif arrow == 'B':  # Down arrow
+                        if matches and drop_sel >= 0:  # In dropdown mode
+                            drop_sel = min(len(matches) - 1, drop_sel + 1)
+                            _render()
+                        else:  # History navigation
+                            if hist_idx < len(history):
+                                hist_idx += 1
+                                buf[:] = list(history[hist_idx] if hist_idx < len(history) else '')
+                                cursor_pos = len(buf)
+                                _render()
+                    elif arrow == 'H':  # Home key
+                        cursor_pos = 0
                         _render()
-                    elif arrow == 'A' and matches: # ↑
-                        drop_sel = max(-1, drop_sel - 1)
+                    elif arrow == 'F':  # End key
+                        cursor_pos = len(buf)
                         _render()
 
             elif ch == '\t':  # Tab: complete first match
@@ -1814,6 +1847,7 @@ class MenuSystem:
     def _run_fallback(self, provider, model, initial_task=None):
         """Fallback to raw terminal input without fixed input area."""
         first_run = True
+        cmd_history = []  # Track command history for up/down navigation
         # Task prompt loop — /provider and /model loop back; /resume + task launch
         while True:
             if first_run:
@@ -1852,7 +1886,7 @@ class MenuSystem:
                 _print_banner(provider, model, input_history[-5:])
 
             try:
-                task = _readline_slash(timeout_seconds=3, on_timeout=redraw_banner)
+                task = _readline_slash(timeout_seconds=3, on_timeout=redraw_banner, history=cmd_history)
                 if task is None:
                     # Timeout occurred, banner redrawn, continue waiting
                     continue
