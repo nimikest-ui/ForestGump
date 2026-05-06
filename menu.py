@@ -1329,8 +1329,8 @@ class MenuSystem:
             if model not in self.providers[provider]['models']:
                 model = list(self.providers[provider]['models'].keys())[0]
 
-            # Use main TUI with slash command support
-            self._run_with_fixed_input(provider, model, initial_task=initial_task)
+            # Use fallback mode for natural text flow (with slash commands + history)
+            self._run_fallback(provider, model, initial_task=initial_task)
 
         except KeyboardInterrupt:
             print(f'\n {_DIM}quit{_RST}')
