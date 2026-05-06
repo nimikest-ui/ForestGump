@@ -12,6 +12,11 @@ from datetime import datetime, timedelta
 
 import memory_manager
 
+try:
+    import theme
+except ImportError:
+    theme = None
+
 
 @dataclass
 class SearchResult:
@@ -366,8 +371,9 @@ class AdvancedMemorySearch:
         """Print memory statistics."""
         stats = self.get_memory_stats()
 
+        banner_text = theme.banner("📊 Memory Statistics") if theme else "📊 Memory Statistics"
         lines = [
-            theme.banner("📊 Memory Statistics"),
+            banner_text,
             f"  Total memories: {stats['total_memories']}",
         ]
 
