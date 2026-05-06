@@ -1913,35 +1913,53 @@ class MenuSystem:
             if task_lower == '/skills':
                 print(f' {_GLD}Search (or press Enter for list):{_RST} ', end='', flush=True)
                 search_term = input().strip()
+                print()
                 if search_term:
                     cmd_skills(type('args', (), {'search': search_term, 'list': False})())
                 else:
                     cmd_skills(type('args', (), {'search': None, 'list': True})())
+                print(f'\n{_DIM}Press Enter to continue...{_RST}', end='', flush=True)
+                input()
                 continue
 
             if task_lower == '/memory':
                 print(f' {_GLD}Search (or press Enter for list):{_RST} ', end='', flush=True)
                 search_term = input().strip()
+                print()
                 if search_term:
                     cmd_memory(type('args', (), {'search': search_term, 'list': False, 'summary': False})())
                 else:
                     cmd_memory(type('args', (), {'search': None, 'list': True, 'summary': False})())
+                print(f'\n{_DIM}Press Enter to continue...{_RST}', end='', flush=True)
+                input()
                 continue
 
             if task_lower == '/sessions':
+                print()
                 cmd_sessions(type('args', (), {'list': True, 'resume': None})())
+                print(f'\n{_DIM}Press Enter to continue...{_RST}', end='', flush=True)
+                input()
                 continue
 
             if task_lower == '/monitor':
+                print()
                 cmd_monitor(type('args', (), {'dashboard': True, 'hours': '24', 'reset': False})())
+                print(f'\n{_DIM}Press Enter to continue...{_RST}', end='', flush=True)
+                input()
                 continue
 
             if task_lower == '/subagents':
+                print()
                 cmd_subagents(type('args', (), {'status': True, 'list': False})())
+                print(f'\n{_DIM}Press Enter to continue...{_RST}', end='', flush=True)
+                input()
                 continue
 
             if task_lower == '/memory-advanced':
+                print()
                 cmd_memory_advanced(type('args', (), {'stats': True, 'high_confidence': False, 'unused': False})())
+                print(f'\n{_DIM}Press Enter to continue...{_RST}', end='', flush=True)
+                input()
                 continue
 
             if task_lower == '/provider':
