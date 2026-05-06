@@ -1329,8 +1329,8 @@ class MenuSystem:
             if model not in self.providers[provider]['models']:
                 model = list(self.providers[provider]['models'].keys())[0]
 
-            # Use fallback mode for natural text flow (with slash commands + history)
-            self._run_fallback(provider, model, initial_task=initial_task)
+            # Use fixed input TUI mode
+            self._run_with_fixed_input(provider, model, initial_task=initial_task)
 
         except KeyboardInterrupt:
             print(f'\n {_DIM}quit{_RST}')
@@ -1741,8 +1741,8 @@ class MenuSystem:
                     nonlocal agent_running, current_task, current_turn, agent_stop_event
                     old_stdout, old_stderr, old_stdin = sys.stdout, sys.stderr, sys.stdin
                     try:
-                        sys.stdout = _RealtimeCapture(add_output)
-                        sys.stderr = sys.stdout
+                        # Don't capture stdout - let it stream directly to terminal
+                        sys.stderr = _real_stdout
 
                         class _SteerStdin:
                             def isatty(self): return False
@@ -1758,12 +1758,12 @@ class MenuSystem:
                         self._execute_agent(provider, model, task, steer_queue=steer_queue, stop_event=agent_stop_event)
                     except Exception as e:
                         import traceback
-                        add_output(f'  [!] Agent error: {e}')
-                        add_output(traceback.format_exc())
+                        _real_stdout.write(f'\n[!] Agent error: {e}\n')
+                        _real_stdout.write(traceback.format_exc())
+                        _real_stdout.flush()
                     finally:
                         sys.stdout, sys.stderr, sys.stdin = old_stdout, old_stderr, old_stdin
                         agent_running = False
-                        redisplay_screen()
 
                 _threading.Thread(target=run_agent_bg, daemon=True).start()
                 redisplay_screen(); return
@@ -1911,10 +1911,9 @@ class MenuSystem:
                             pass
                     redisplay_screen()
 
-                # Refresh screen more frequently when agent is running
+                # Don't redraw screen while agent is streaming output naturally
                 if agent_running:
-                    redisplay_screen()
-                    time.sleep(0.01)  # Faster refresh during agent execution
+                    time.sleep(0.1)  # Light sleep while agent runs
                 else:
                     time.sleep(0.05)
 
