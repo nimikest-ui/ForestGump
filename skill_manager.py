@@ -244,7 +244,7 @@ def archive_skill(skill_id: int) -> None:
         conn.commit()
 
 
-def skills_context(task_description: str) -> str:
+def skills_context(task_description: str, limit: int = 5, is_haiku: bool = False) -> str:
     """
     Get skills context for agent prompt.
 
@@ -253,11 +253,16 @@ def skills_context(task_description: str) -> str:
 
     Args:
         task_description: The task the agent is solving
+        limit: Max skills to return (default: 5; reduced to 2 for Haiku)
+        is_haiku: Whether using Haiku model (auto-adjusts limit)
 
     Returns:
-        Formatted string of top 5 relevant skills
+        Formatted string of top N relevant skills
     """
-    skills = search_skills(task_description, limit=5)
+    if is_haiku and limit == 5:
+        limit = 2
+
+    skills = search_skills(task_description, limit=limit)
     if not skills:
         return ''
 

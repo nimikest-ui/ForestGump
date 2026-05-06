@@ -28,7 +28,8 @@ __version__ = '0.2.0'
 
 def cmd_chat(args):
     """Start an interactive pentesting session."""
-    from agent import run_agent
+    import os
+    from agent import run_agent, ClaudeCliProvider, AnthropicProvider, CopilotProvider, OllamaProvider
 
     task = args.task if hasattr(args, 'task') and args.task else ' '.join(args.task_args) if hasattr(args, 'task_args') else None
     if not task:
@@ -36,14 +37,32 @@ def cmd_chat(args):
         print(f'Usage: forestgump chat "<your pentesting task>"')
         return 1
 
+    # Instantiate provider object (matching agent.py's main() logic)
+    provider_name = args.provider or 'claude'
+
+    if provider_name == 'claude':
+        provider = ClaudeCliProvider(args.model or 'haiku')
+    elif provider_name == 'anthropic':
+        if not os.environ.get('ANTHROPIC_API_KEY'):
+            print(error(f'{Symbols.CROSS} Set ANTHROPIC_API_KEY environment variable'))
+            return 1
+        provider = AnthropicProvider(args.model or 'claude-sonnet-4-20250514')
+    elif provider_name == 'copilot':
+        provider = CopilotProvider(args.model or 'claude-sonnet-4.5')
+    else:  # ollama
+        default_model = 'gpt-oss:120b-cloud' if os.environ.get('OLLAMA_API_KEY') else 'llama3.2:latest'
+        provider = OllamaProvider(
+            model=args.model or default_model,
+            host=args.host if hasattr(args, 'host') else None,
+        )
+
     # Pass through to agent
     return run_agent(
+        provider=provider,
         task=task,
-        provider=args.provider or 'claude',
-        model=args.model,
-        no_confirm=args.no_confirm,
+        confirm=not args.no_confirm,
         max_turns=args.max_turns,
-        resume_session=args.resume,
+        resume_data=args.resume if hasattr(args, 'resume') else None,
     )
 
 
@@ -477,6 +496,7 @@ def main():
     chat_parser.add_argument('task_args', nargs='*', help='Task description')
     chat_parser.add_argument('--provider', help='LLM provider (claude, ollama, anthropic, copilot)')
     chat_parser.add_argument('--model', help='Model name')
+    chat_parser.add_argument('--host', help='Ollama host URL (default: http://localhost:11434)')
     chat_parser.add_argument('--no-confirm', action='store_true', help='Skip command confirmation')
     chat_parser.add_argument('--max-turns', type=int, default=50, help='Max conversation turns')
     chat_parser.add_argument('--resume', help='Resume from session file')
