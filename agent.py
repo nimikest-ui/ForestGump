@@ -416,6 +416,64 @@ class CopilotProvider:
         return output
 
 
+# ─── Provider with Fallback ───────────────────────────────────
+
+class ProviderWithFallback:
+    """Wrapper that automatically falls back to a larger model on failure detection."""
+
+    def __init__(self, main_provider, fallback_provider=None):
+        self.main = main_provider
+        self.fallback = fallback_provider
+        self.using_fallback = False
+        self.fallback_trigger_turn = None
+
+    def chat(self, messages, system):
+        """Try main provider; fall back to larger model if needed."""
+        try:
+            response = self.main.chat(messages, system)
+            # Check for failure patterns (empty response, etc)
+            if response and response.strip():
+                return response
+        except Exception as e:
+            print(f'\n⚠️  Provider error: {e}')
+
+        # If we have a fallback and aren't already using it, try fallback
+        if self.fallback and not self.using_fallback:
+            print(f'\n🔄 Falling back to {self.fallback.model}...')
+            self.using_fallback = True
+            self.fallback_trigger_turn = len(messages)
+            try:
+                return self.fallback.chat(messages, system)
+            except Exception as e:
+                print(f'\n❌ Fallback also failed: {e}')
+                raise
+
+        raise RuntimeError(f'Provider {self.main.model} failed and no fallback available')
+
+    @property
+    def model(self):
+        """Return current model in use."""
+        if self.using_fallback and self.fallback:
+            return self.fallback.model
+        return self.main.model
+
+    @property
+    def name(self):
+        """Return current provider name."""
+        if self.using_fallback and self.fallback:
+            return f'{self.fallback.name} (fallback)'
+        return self.main.name
+
+    @property
+    def _usage(self):
+        """Delegate usage tracking to current provider."""
+        if self.using_fallback and hasattr(self.fallback, '_usage'):
+            return self.fallback._usage
+        if hasattr(self.main, '_usage'):
+            return self.main._usage
+        return None
+
+
 # ─── Memory ───────────────────────────────────────────────────
 
 def load_memory():
@@ -765,13 +823,13 @@ def calculate_api_cost(model, input_tokens, output_tokens, cache_creation=0, cac
     return cost
 
 
-def save_session(task, provider_name, turn_count, messages, log, mem, session_id=None, cost_data=None):
-    """Save full session state for resume, including cost tracking."""
+def save_session(task, provider_name, turn_count, messages, log, mem, session_id=None, cost_data=None, fallback_info=None):
+    """Save full session state for resume, including cost tracking and fallback info."""
     SESSIONS_DIR.mkdir(exist_ok=True)
     ts = session_id or datetime.now().strftime('%Y%m%d_%H%M%S')
     session_file = SESSIONS_DIR / f'{ts}.json'
     with open(session_file, 'w') as f:
-        json.dump({
+        session_data = {
             'task': task,
             'provider': provider_name,
             'turns': turn_count,
@@ -780,7 +838,10 @@ def save_session(task, provider_name, turn_count, messages, log, mem, session_id
             'memory': mem,
             'timestamp': ts,
             'cost': cost_data or {},  # Track API costs
-        }, f, indent=2)
+        }
+        if fallback_info:
+            session_data['fallback'] = fallback_info
+        json.dump(session_data, f, indent=2)
     return str(session_file)
 
 
@@ -859,7 +920,31 @@ You: Let me check the network interfaces.
 Then I will reply with the real output, and you decide the next step."""
 
 
-def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
+def trim_context(messages, target_recent_turns=15):
+    """Trim old messages from conversation to prevent context explosion on long sessions.
+
+    Keeps the most recent N turns of messages (both user and assistant).
+    Returns (trimmed_messages, was_trimmed).
+    """
+    if len(messages) <= target_recent_turns * 2:
+        return messages, False
+
+    # Count message pairs (each turn = 1 user + 1 assistant)
+    # We want to keep the most recent N turns, so N*2 messages
+    keep_count = target_recent_turns * 2
+    trimmed = messages[-keep_count:]
+
+    # Add a note as the first message to explain the trimming
+    if trimmed:
+        trimmed[0] = {
+            'role': trimmed[0]['role'],
+            'content': f"[Context trimmed: keeping last {target_recent_turns} turns]\n\n{trimmed[0].get('content', '')}"
+        }
+
+    return trimmed, True
+
+
+def run_agent(provider, task, max_turns=50, max_turn_time=30, confirm=True, resume_data=None):
     shell = Shell()
     mem = load_memory()
     techniques = load_techniques()
@@ -924,6 +1009,7 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
     try:
         for turn in range(1, max_turns + 1):
             turn_count = turn
+            turn_start = time.time()
             print(f'\n{"─"*25} Turn {turn} {"─"*25}')
 
             if turn >= next_review_turn:
@@ -932,6 +1018,12 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                     print('\n📊 Periodic review injected (ranked success/failure + memory/skills retrieval)')
                     messages.append({'role': 'user', 'content': review})
                 next_review_turn = turn + random.randint(3, 6)
+
+            # ── Trim context on long sessions ──
+            if turn >= 20 and len(messages) > 40:
+                messages, was_trimmed = trim_context(messages, target_recent_turns=15)
+                if was_trimmed:
+                    print(f'\n♻️  Context trimmed: keeping last 15 turns ({len(messages)} messages)')
 
             # ── LLM thinks ──
             t_llm_start = time.time()
@@ -1218,15 +1310,6 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
                 else:
                     output = f'[airodump-ng ran for {elapsed}s — no -w path specified, cannot read output]'
 
-            # Detect empty/broken output — shell might be corrupted by ncurses
-            elif not is_airodump and not is_aireplay and not is_bluetooth and not is_nmap:
-                clean = output.replace('echo', '').replace('[command timed out]', '').strip()
-                if not clean or clean == 'echo':
-                    print('\n⚠️  Empty output — resetting shell')
-                    shell.close()
-                    shell = Shell()
-                    output = f'[command returned no output after {cmd_timeout}s — the shell has been reset.]'
-
             # Truncate massive output for display and context
             display = output[:5000] + ('\n... [truncated]' if len(output) > 5000 else '')
             context = output[:12000] + ('\n... [truncated]' if len(output) > 12000 else '')
@@ -1237,6 +1320,21 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
 
             # ── Auto-extract memory from output ──
             mem = extract_memory_updates(response, output, cmd, mem)
+
+            # ── End-of-turn checks ──
+            # Detect empty/broken output — shell might be corrupted by ncurses
+            if not is_airodump and not is_aireplay and not is_bluetooth and not is_nmap:
+                clean = output.replace('echo', '').replace('[command timed out]', '').strip()
+                if not clean or clean == 'echo':
+                    print('\n⚠️  Empty output — resetting shell')
+                    shell.close()
+                    shell = Shell()
+
+            # Log turn timing
+            turn_elapsed = time.time() - turn_start
+            if turn_elapsed > max_turn_time:
+                print(f'\n⏱️  Turn exceeded limit: {turn_elapsed:.1f}s > {max_turn_time}s')
+            log.append({'turn': turn, 'type': 'timing', 'elapsed_s': round(turn_elapsed, 1), 'ts': turn_start})
 
     except KeyboardInterrupt:
         print('\n\n⛔ Interrupted by operator.')
@@ -1269,7 +1367,15 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
         }
 
     # ── Save session (for resume) ──
-    session_file = save_session(task, provider.name, turn_count, messages, log, mem, session_id, cost_data)
+    fallback_info = None
+    if isinstance(provider, ProviderWithFallback) and provider.using_fallback:
+        fallback_info = {
+            'triggered': True,
+            'fallback_model': provider.fallback.model,
+            'fallback_turn': provider.fallback_trigger_turn
+        }
+
+    session_file = save_session(task, provider.name, turn_count, messages, log, mem, session_id, cost_data, fallback_info)
     print(f'\n📝 Session saved: {session_file}')
     print(f'   Resume with: python agent.py --resume {session_file}')
 
@@ -1298,10 +1404,13 @@ def main():
     ap.add_argument('--provider', choices=['claude', 'ollama', 'anthropic', 'copilot'], default='claude',
                     help='Model provider (default: claude)')
     ap.add_argument('--model', help='Model name override')
+    ap.add_argument('--fallback-model', help='Fallback model for auto-retry on failure (e.g., claude-sonnet-4-20250514)')
     ap.add_argument('--host', help='Ollama host URL (default: http://localhost:11434)')
     ap.add_argument('--no-confirm', action='store_true',
                     help='Skip command confirmation (YOLO mode)')
     ap.add_argument('--max-turns', type=int, default=50)
+    ap.add_argument('--max-turn-time', type=int, default=30,
+                    help='Max seconds per turn (default: 30s)')
     ap.add_argument('--resume', metavar='SESSION', help='Resume a previous session (path to session JSON)')
     ap.add_argument('--list-sessions', action='store_true', help='List recent sessions')
     ap.add_argument('task', nargs='?', help='What to do (prompted if omitted)')
@@ -1338,6 +1447,22 @@ def main():
             host=args.host,
         )
 
+    # Wrap with fallback if provided
+    if args.fallback_model:
+        fallback = None
+        if args.provider == 'claude':
+            fallback = ClaudeCliProvider(args.fallback_model)
+        elif args.provider == 'anthropic':
+            fallback = AnthropicProvider(args.fallback_model)
+        elif args.provider == 'copilot':
+            fallback = CopilotProvider(args.fallback_model)
+        elif args.provider == 'ollama':
+            fallback = OllamaProvider(model=args.fallback_model, host=args.host)
+
+        if fallback:
+            provider = ProviderWithFallback(provider, fallback)
+            print(f'✓ Fallback enabled: {provider.fallback.model if hasattr(provider, "fallback") else "N/A"}')
+
     # Resume or new task
     resume_data = None
     if args.resume:
@@ -1352,7 +1477,7 @@ def main():
             print('No task provided.')
             sys.exit(1)
 
-    run_agent(provider, task, max_turns=args.max_turns, confirm=not args.no_confirm, resume_data=resume_data)
+    run_agent(provider, task, max_turns=args.max_turns, max_turn_time=args.max_turn_time, confirm=not args.no_confirm, resume_data=resume_data)
 
 
 if __name__ == '__main__':

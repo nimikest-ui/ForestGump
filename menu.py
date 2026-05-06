@@ -255,34 +255,37 @@ class MenuSystem:
                 if 0 <= idx < len(options):
                     return idx
 
-    def _direct_run(self, provider, model, task):
+    def _direct_run(self, provider, model, task, fallback_model=None):
         """Run agent directly without menu (for CLI args)"""
         try:
             # Validate provider exists
             if provider not in self.providers:
                 print(f"{Colors.RED}✗ Unknown provider: {provider}{Colors.RESET}")
                 sys.exit(1)
-            
+
             # Validate model exists
             models_dict = self.providers[provider]['models']
             if model not in models_dict:
                 print(f"{Colors.RED}✗ Unknown model for {provider}: {model}{Colors.RESET}")
                 print(f"Available: {', '.join(list(models_dict.keys())[:5])}...")
                 sys.exit(1)
-            
+
             # Save history and run
             self._save_history(provider, model, task)
-            self._execute_agent(provider, model, task)
-        
+            self._execute_agent(provider, model, task, fallback_model=fallback_model)
+
         except Exception as e:
             print(f"{Colors.RED}✗ Error: {e}{Colors.RESET}")
             sys.exit(1)
 
-    def _execute_agent(self, provider, model, task):
+    def _execute_agent(self, provider, model, task, fallback_model=None):
         """Execute the agent"""
-        cmd = ['python3', 'agent.py', '--provider', provider, '--model', model, task]
+        cmd = ['python3', 'agent.py', '--provider', provider, '--model', model]
+        if fallback_model:
+            cmd.extend(['--fallback-model', fallback_model])
+        cmd.append(task)
         env = os.environ.copy()
-        
+
         print(f"{Colors.GREEN}✓ Starting agent...{Colors.RESET}\n")
         print('='*60 + '\n')
         result = subprocess.run(cmd, cwd=SCRIPT_DIR, env=env)
@@ -336,17 +339,18 @@ if __name__ == '__main__':
     import argparse
     
     parser = argparse.ArgumentParser(description='Bare Metal Agent CLI')
-    parser.add_argument('--provider', help='Provider: ollama, claude, anthropic')
+    parser.add_argument('--provider', help='Provider: ollama, claude, anthropic, copilot')
     parser.add_argument('--model', help='Model name')
+    parser.add_argument('--fallback-model', help='Fallback model for auto-retry on failure')
     parser.add_argument('--yes', '-y', action='store_true', help='Skip confirmations')
     parser.add_argument('task', nargs='?', help='Task to execute')
-    
+
     args = parser.parse_args()
-    
+
     menu = MenuSystem()
-    
+
     # Direct mode: bypass menu if all args provided
     if args.provider and args.model and args.task:
-        menu._direct_run(args.provider, args.model, args.task)
+        menu._direct_run(args.provider, args.model, args.task, fallback_model=args.fallback_model)
     else:
         menu.run()
