@@ -1,11 +1,5 @@
 [
   {
-    "timestamp": "2026-05-06T03:03:26.676428",
-    "provider": "claude",
-    "model": "haiku",
-    "task": "hi"
-  },
-  {
     "timestamp": "2026-05-06T03:06:02.680778",
     "provider": "claude",
     "model": "haiku",
@@ -115,6 +109,12 @@
   },
   {
     "timestamp": "2026-05-06T06:14:04.049825",
+    "provider": "claude",
+    "model": "haiku",
+    "task": "hi"
+  },
+  {
+    "timestamp": "2026-05-06T06:16:14.507247",
     "provider": "claude",
     "model": "haiku",
     "task": "hi"

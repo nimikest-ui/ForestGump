@@ -1329,7 +1329,7 @@ class MenuSystem:
             if model not in self.providers[provider]['models']:
                 model = list(self.providers[provider]['models'].keys())[0]
 
-            # Use fixed input TUI mode
+            # Use fixed input TUI mode with organized submenus
             self._run_with_fixed_input(provider, model, initial_task=initial_task)
 
         except KeyboardInterrupt:
@@ -1464,20 +1464,32 @@ class MenuSystem:
                     cols3 = 80
                 max_task = max(10, cols3 - 4)
                 task_display = current_task[:max_task] + ('…' if len(current_task) > max_task else '')
-                mission = f' ◈ {task_display}'
+                mission = f' {_GLD}◈{_RST} {_BLD}{task_display}{_RST}'
             else:
-                mission = ' ◈ ForestGump — ready'
-            stats = f' ⚕ {model_display} │ 100K/400K │ [██░░░░░░░░] 25% │ {time_str}'
+                mission = f' {_GLD}◈{_RST} {_DIM}ForestGump — ready{_RST}'
+            stats = f' {_GLD}⚕{_RST}  {_AMB}{model_display}{_RST} │ 100K/400K │ [██░░░░░░░░] 25% │ {_DIM}{time_str}{_RST}'
             return mission, stats
 
         def _draw_slash_picker():
             out = _real_stdout
             filtered = [(cmd, desc) for cmd, desc in SLASH_COMMANDS_LOCAL if slash_filter == '' or slash_filter in cmd][:12]
-            # Draw BELOW the prompt line (Hermes-like): write new lines after prompt
-            out.write('\n' + '─' * max(20, cols) + '\n')
+            # Clear and draw picker below prompt
+            out.write('\033[J')  # Clear from cursor to end of screen
+            out.write('\n' + '─' * min(cols, 80) + '\n')
             for i, (cmd, desc) in enumerate(filtered):
-                marker = '▶ ' if i == slash_picker_idx % max(1, len(filtered)) else '  '
+                marker = f'{_GLD}▶{_RST} ' if i == slash_picker_idx % max(1, len(filtered)) else '  '
                 out.write(f' {marker}{cmd:<36} {desc[:max(10, cols-42)]}\n')
+            out.flush()
+
+        def _update_prompt_only():
+            """Update just the prompt line without full screen redraw."""
+            out = _real_stdout
+            try:
+                rows2, _ = os.get_terminal_size()
+            except OSError:
+                rows2 = 24
+            prompt = f' {_GLD}❯{_RST} {current_input}'
+            out.write('\033[{};1H'.format(rows2)); out.write('\033[2K'); out.write(prompt)
             out.flush()
 
         def redisplay_screen():
@@ -1494,7 +1506,8 @@ class MenuSystem:
             mission_line, stats_line = get_status_lines()
             out.write('\033[{};1H'.format(rows-3)); out.write('\033[2K'); out.write(mission_line)
             out.write('\033[{};1H'.format(rows-2)); out.write('\033[2K'); out.write(stats_line)
-            out.write('\033[{};1H'.format(rows)); out.write('\033[2K'); out.write(' ❯ ' + current_input)
+            prompt = f' {_GLD}❯{_RST} {current_input}'
+            out.write('\033[{};1H'.format(rows)); out.write('\033[2K'); out.write(prompt)
             if slash_picker_active:
                 _draw_slash_picker()
             out.flush()
@@ -1807,7 +1820,10 @@ class MenuSystem:
 
             if len(key) == 1 and ord(key) >= 32:
                 current_input += key
-                redisplay_screen()
+                if slash_picker_active:
+                    redisplay_screen()  # Redraw to filter picker
+                else:
+                    _update_prompt_only()  # Just update prompt line
 
         add_output('')
         add_output('  ⚕ Forest Gump')
