@@ -181,12 +181,28 @@ def _print_banner(provider, model, history):
     ))
 
 
-def _readline_slash():
-    """Custom input: typing '/' shows autocomplete dropdown (unless COLOR=1)."""
+def _readline_slash(timeout_seconds=3, on_timeout=None):
+    """Custom input with timeout: typing '/' shows autocomplete dropdown (unless COLOR=1).
+
+    Args:
+        timeout_seconds: Timeout in seconds before returning None (triggers redraw)
+        on_timeout: Optional callback function to call when timeout occurs
+    """
     import re as _re
 
     if not USE_COLOR:
-        return input()
+        # For non-color mode, use select with timeout
+        import select
+        try:
+            rdy, _, _ = select.select([sys.stdin], [], [], timeout_seconds)
+            if rdy:
+                return input()
+            else:
+                if on_timeout:
+                    on_timeout()
+                return None
+        except Exception:
+            return input()
 
     buf          = []
     drop_sel     = -1
@@ -195,6 +211,8 @@ def _readline_slash():
     fd  = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     tty.setraw(fd)
+
+    import select as _select
 
     def _visible(s):
         return len(_re.sub(r'\033\[[^m]*m', '', s))
@@ -247,7 +265,19 @@ def _readline_slash():
         sys.stdout.flush()
         _render()
 
+        import fcntl as _fcntl
+        flags = _fcntl.fcntl(fd, _fcntl.F_GETFL)
+
         while True:
+            # Use select with timeout to allow periodic redraws
+            rdy, _, _ = _select.select([fd], [], [], timeout_seconds)
+            if not rdy:
+                # Timeout occurred, call callback if provided
+                _clear_drop()
+                if on_timeout:
+                    on_timeout()
+                return None
+
             ch = sys.stdin.read(1)
 
             if ch in ('\r', '\n'):
@@ -1796,8 +1826,23 @@ class MenuSystem:
                 print()
 
             _hr()
+
+            # Read with timeout for auto-refresh every 3 seconds
+            def redraw_banner():
+                """Redraw banner when timeout occurs."""
+                try:
+                    rows, cols = os.get_terminal_size()
+                except:
+                    rows, cols = 24, 80
+                os.system('clear' if os.name != 'nt' else 'cls')
+                _print_banner(provider, model, input_history[-5:])
+
             try:
-                task = _readline_slash().strip()
+                task = _readline_slash(timeout_seconds=3, on_timeout=redraw_banner)
+                if task is None:
+                    # Timeout occurred, banner redrawn, continue waiting
+                    continue
+                task = task.strip()
             except Exception:
                 print(f' {_GLD}>{_RST} ', end='', flush=True)
                 task = input().strip()
