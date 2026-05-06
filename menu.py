@@ -1911,7 +1911,12 @@ class MenuSystem:
                             pass
                     redisplay_screen()
 
-                time.sleep(0.05)
+                # Refresh screen more frequently when agent is running
+                if agent_running:
+                    redisplay_screen()
+                    time.sleep(0.01)  # Faster refresh during agent execution
+                else:
+                    time.sleep(0.05)
 
         except KeyboardInterrupt:
             pass
