@@ -1585,21 +1585,27 @@ class MenuSystem:
             elif c == '/skills':
                 add_output('')
                 cmd_skills(type('args', (), {'search': None, 'list': True})())
+                add_output(f'\n{_DIM}(Press Enter to continue){_RST}')
             elif c == '/memory':
                 add_output('')
                 cmd_memory(type('args', (), {'search': None, 'list': True, 'summary': False})())
+                add_output(f'\n{_DIM}(Press Enter to continue){_RST}')
             elif c == '/sessions':
                 add_output('')
                 cmd_sessions(type('args', (), {'list': True, 'resume': None})())
+                add_output(f'\n{_DIM}(Press Enter to continue){_RST}')
             elif c == '/monitor':
                 add_output('')
                 cmd_monitor(type('args', (), {'dashboard': True, 'hours': '24', 'reset': False})())
+                add_output(f'\n{_DIM}(Press Enter to continue){_RST}')
             elif c == '/subagents':
                 add_output('')
                 cmd_subagents(type('args', (), {'status': True, 'list': False})())
+                add_output(f'\n{_DIM}(Press Enter to continue){_RST}')
             elif c == '/memory-advanced':
                 add_output('')
                 cmd_memory_advanced(type('args', (), {'stats': True, 'high_confidence': False, 'unused': False})())
+                add_output(f'\n{_DIM}(Press Enter to continue){_RST}')
             elif c == '/quit':
                 exit_requested = True
 
