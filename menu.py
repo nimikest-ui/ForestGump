@@ -134,7 +134,7 @@ SLASH_COMMANDS = [
     ('/resume',            'resume previous session'),
 ]
 _MAX_DROP  = len(SLASH_COMMANDS)
-_CMD_WIDTH = 18  # fixed left column width for slash command names
+_CMD_WIDTH = 20  # fixed left column width for slash command names
 
 
 def _hr():
@@ -1337,24 +1337,31 @@ class MenuSystem:
         session_start = time.time()
 
         SLASH_COMMANDS_LOCAL = [
-            ('/new',      'Start a new session (fresh context)'),
-            ('/reset',    'Start a new session (fresh context)'),
-            ('/clear',    'Clear screen and keep current session'),
-            ('/history',  'Show conversation history'),
-            ('/save',     'Save current session state'),
-            ('/retry',    'Retry the last user message'),
-            ('/undo',     'Remove last exchange from local buffer'),
-            ('/title',    'Set title for current session'),
-            ('/branch',   'Branch current session (snapshot)'),
-            ('/fork',     'Branch current session (snapshot)'),
-            ('/compress', 'Compress conversation context'),
-            ('/rollback', 'Restore previous checkpoint'),
-            ('/provider', 'Switch AI provider'),
-            ('/model',    'Switch AI model'),
-            ('/resume',   'Resume a previous session'),
-            ('/help',     'Show all slash commands'),
-            ('/status',   'Show provider/session status'),
-            ('/quit',     'Exit ForestGump'),
+            ('/chat',             'Start chat session with custom task'),
+            ('/skills',           'Browse or search learned skills'),
+            ('/memory',           'Search or list persistent memory'),
+            ('/sessions',         'List recent sessions'),
+            ('/monitor',          'Show metrics dashboard'),
+            ('/subagents',        'Show subagent task status'),
+            ('/memory-advanced',  'Advanced memory search & stats'),
+            ('/provider',         'Switch AI provider'),
+            ('/model',            'Switch AI model'),
+            ('/resume',           'Resume a previous session'),
+            ('/new',              'Start a new session (fresh context)'),
+            ('/reset',            'Start a new session (fresh context)'),
+            ('/clear',            'Clear screen and keep current session'),
+            ('/history',          'Show conversation history'),
+            ('/save',             'Save current session state'),
+            ('/retry',            'Retry the last user message'),
+            ('/undo',             'Remove last exchange from local buffer'),
+            ('/title',            'Set title for current session'),
+            ('/branch',           'Branch current session (snapshot)'),
+            ('/fork',             'Branch current session (snapshot)'),
+            ('/compress',         'Compress conversation context'),
+            ('/rollback',         'Restore previous checkpoint'),
+            ('/help',             'Show all slash commands'),
+            ('/status',           'Show provider/session status'),
+            ('/quit',             'Exit ForestGump'),
         ]
         slash_picker_active = False
         slash_picker_idx = 0
