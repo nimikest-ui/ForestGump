@@ -1501,6 +1501,7 @@ class MenuSystem:
 
         def _execute_slash(cmd):
             nonlocal provider, model, exit_requested, pending_menu, flags, fd
+            import io as _io
             c = cmd.strip().lower()
             if c == '/help':
                 add_output('')
@@ -1584,7 +1585,6 @@ class MenuSystem:
                 m, s = get_status_lines(); add_output(m); add_output(s)
             elif c == '/skills':
                 add_output('')
-                import io as _io
                 old_stdout = sys.stdout
                 sys.stdout = _io.StringIO()
                 try:
