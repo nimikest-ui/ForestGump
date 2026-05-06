@@ -31,6 +31,9 @@ def cmd_chat(args):
     import os
     from agent import run_agent, ClaudeCliProvider, AnthropicProvider, CopilotProvider, OllamaProvider
 
+    # Clear screen before starting
+    os.system('clear' if os.name != 'nt' else 'cls')
+
     task = args.task if hasattr(args, 'task') and args.task else ' '.join(args.task_args) if hasattr(args, 'task_args') else None
     if not task:
         print(error(f'{Symbols.CROSS} No task specified'))
