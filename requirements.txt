@@ -1,0 +1,16 @@
+# ForestGump — Bare Metal Agent dependencies
+
+# LLM providers
+anthropic>=0.52.0          # Anthropic API provider (--provider anthropic)
+
+# Hindsight semantic memory (optional — only needed if HINDSIGHT_URL is set)
+# Connects to a running Hindsight server (Docker or remote).
+# Start server: docker run --rm -it -p 8888:8888 -p 9999:9999 \
+#   -e HINDSIGHT_API_LLM_API_KEY=$OPENAI_API_KEY \
+#   -v $HOME/.hindsight-docker:/home/hindsight/.pg0 \
+#   ghcr.io/vectorize-io/hindsight:latest
+# Then: export HINDSIGHT_URL=http://localhost:8888
+hindsight-client>=0.6.0
+
+# requests is used transitively but handy to pin
+requests>=2.32.0

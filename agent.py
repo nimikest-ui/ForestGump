@@ -47,6 +47,11 @@ from pathlib import Path
 
 from skills import init_db as init_skills_db, skills_context, extract_skills_from_session, migrate_techniques_json
 
+try:
+    from hindsight_memory import HindsightMemory
+except ImportError:
+    HindsightMemory = None
+
 SCRIPT_DIR = Path(__file__).parent.resolve()
 SESSIONS_DIR = SCRIPT_DIR / 'sessions'
 MEMORY_FILE = SCRIPT_DIR / 'memory.json'
@@ -376,7 +381,7 @@ class CopilotProvider:
         full_prompt = full_prompt.replace('\x00', '').replace('\r\n', '\n')
 
         cmd = [
-            'gh', 'copilot',
+            '/usr/bin/gh', 'copilot',
             '--model', self.model,
             '--output-format', 'text',
             '--no-custom-instructions',  # ForestGump supplies its own system prompt above
@@ -949,6 +954,11 @@ def run_agent(provider, task, max_turns=50, max_turn_time=30, confirm=True, resu
     mem = load_memory()
     techniques = load_techniques()
 
+    # Initialize Hindsight semantic memory (optional — no-op if HINDSIGHT_URL not set)
+    hs = HindsightMemory.from_env() if HindsightMemory else None
+    if hs:
+        print(f'  🧠 Hindsight: connected (bank: {hs.bank_id})')
+
     # Initialize skills DB and migrate techniques.json on first run
     init_skills_db()
     migrate_techniques_json(SCRIPT_DIR / 'techniques.json')
@@ -1004,6 +1014,10 @@ def run_agent(provider, task, max_turns=50, max_turn_time=30, confirm=True, resu
         first_msg = f'Task: {task}\n\nYou have a live bash shell on Kali Linux. Send ONE command at a time. I will execute it and give you the real output. Go.'
         if mem_ctx:
             first_msg += f'\n\nHere is what you remember from previous sessions:\n{mem_ctx}'
+        if hs:
+            hs_ctx = hs.recall(task)
+            if hs_ctx:
+                first_msg += f'\n\nRelevant past experiences (from Hindsight memory):\n{hs_ctx}'
         messages.append({'role': 'user', 'content': first_msg})
 
     try:
@@ -1046,6 +1060,12 @@ def run_agent(provider, task, max_turns=50, max_turn_time=30, confirm=True, resu
                 print(f'\n{"="*60}')
                 print(f'  ✅ DONE ({turn} turns): {summary}')
                 print(f'{"="*60}')
+                if hs:
+                    hs.retain(
+                        f'Session completed. Task: {task}\nResult: {summary}',
+                        context='session_summary',
+                        tags=['session', 'done'],
+                    )
                 break
 
             # ── Extract command ──
@@ -1318,6 +1338,11 @@ def run_agent(provider, task, max_turns=50, max_turn_time=30, confirm=True, resu
             messages.append({'role': 'user', 'content': f'Terminal output:\n```\n{context}\n```'})
             log.append({'turn': turn, 'type': 'exec', 'cmd': cmd, 'output': output[:12000], 'ts': t_exec_start, 'exec_s': elapsed})
 
+            # ── Retain significant command results in Hindsight ──
+            if hs and output and len(output.strip()) > 30:
+                retain_content = f'Command: {cmd}\nOutput: {output[:600]}'
+                hs.retain(retain_content, context=task, tags=['exec'])
+
             # ── Auto-extract memory from output ──
             mem = extract_memory_updates(response, output, cmd, mem)
 
@@ -1340,6 +1365,8 @@ def run_agent(provider, task, max_turns=50, max_turn_time=30, confirm=True, resu
         print('\n\n⛔ Interrupted by operator.')
     finally:
         shell.close()
+        if hs:
+            hs.close()
 
     # ── Save memory ──
     save_memory(mem)
