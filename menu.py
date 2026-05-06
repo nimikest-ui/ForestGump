@@ -1329,11 +1329,16 @@ class MenuSystem:
             if model not in self.providers[provider]['models']:
                 model = list(self.providers[provider]['models'].keys())[0]
 
-            # Use fallback TUI (supports slash commands and history)
-            self._run_fallback(provider, model, initial_task=initial_task)
+            # Use main TUI with slash command support
+            self._run_with_fixed_input(provider, model, initial_task=initial_task)
 
         except KeyboardInterrupt:
             print(f'\n {_DIM}quit{_RST}')
+            sys.exit(1)
+        except Exception as e:
+            print(f'\n✗ Error: {e}', file=sys.stderr)
+            import traceback
+            traceback.print_exc()
             sys.exit(1)
 
     def _run_with_fixed_input(self, provider, model, initial_task=None):
@@ -1577,6 +1582,24 @@ class MenuSystem:
                 add_output('  (rollback) not implemented yet')
             elif c == '/status':
                 m, s = get_status_lines(); add_output(m); add_output(s)
+            elif c == '/skills':
+                add_output('')
+                cmd_skills(type('args', (), {'search': None, 'list': True})())
+            elif c == '/memory':
+                add_output('')
+                cmd_memory(type('args', (), {'search': None, 'list': True, 'summary': False})())
+            elif c == '/sessions':
+                add_output('')
+                cmd_sessions(type('args', (), {'list': True, 'resume': None})())
+            elif c == '/monitor':
+                add_output('')
+                cmd_monitor(type('args', (), {'dashboard': True, 'hours': '24', 'reset': False})())
+            elif c == '/subagents':
+                add_output('')
+                cmd_subagents(type('args', (), {'status': True, 'list': False})())
+            elif c == '/memory-advanced':
+                add_output('')
+                cmd_memory_advanced(type('args', (), {'stats': True, 'high_confidence': False, 'unused': False})())
             elif c == '/quit':
                 exit_requested = True
 
