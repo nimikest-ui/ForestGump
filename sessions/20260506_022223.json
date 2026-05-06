@@ -1,0 +1,44 @@
+{
+  "task": "hi",
+  "provider": "claude-cli/haiku",
+  "turns": 1,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Task: hi\n\nSend ONE command. Get output. Repeat."
+    },
+    {
+      "role": "assistant",
+      "content": "<cmd>whoami</cmd>"
+    }
+  ],
+  "log": [
+    {
+      "turn": 1,
+      "type": "thought",
+      "content": "<cmd>whoami</cmd>",
+      "tokens": {
+        "input_tokens": 26,
+        "output_tokens": 391,
+        "cache_creation_input_tokens": 410,
+        "cache_read_input_tokens": 24242
+      },
+      "ts": 1778034136.8939247,
+      "llm_s": 11.9
+    }
+  ],
+  "memory": {
+    "facts": [],
+    "networks": {},
+    "credentials": {},
+    "notes": [],
+    "_migrated_techniques": true
+  },
+  "token_totals": {
+    "input_tokens": 26,
+    "output_tokens": 391,
+    "cache_creation_input_tokens": 410,
+    "cache_read_input_tokens": 24242
+  },
+  "timestamp": "20260506_022223"
+}

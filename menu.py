@@ -403,13 +403,17 @@ class MenuSystem:
     def getch_unix(self):
         if os.name != 'posix':
             return sys.stdin.read(1)
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
         try:
-            tty.setraw(fd)
-            ch = sys.stdin.read(1)
+            tty_fd = os.open('/dev/tty', os.O_RDWR | os.O_NOCTTY)
+        except OSError:
+            return sys.stdin.read(1)
+        old = termios.tcgetattr(tty_fd)
+        try:
+            tty.setraw(tty_fd)
+            ch = os.read(tty_fd, 1).decode('utf-8', errors='replace')
         finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            termios.tcsetattr(tty_fd, termios.TCSADRAIN, old)
+            os.close(tty_fd)
         return ch
 
     def show_menu(self, title, options, descs=None):
@@ -530,7 +534,7 @@ class MenuSystem:
                     return idx
 
     def _pick_session(self, follow_up_task=''):
-        """Interactive session picker. Returns immediately after launching."""
+        """Interactive session picker. Returns selected session data (doesn't launch subprocess)."""
         sessions = _load_sessions(SCRIPT_DIR / 'sessions')
         if not sessions:
             self.clear_screen()
@@ -543,14 +547,14 @@ class MenuSystem:
                 self.getch_unix()
             except Exception:
                 pass
-            return
+            return None
 
         selected   = 0
         scroll_off = 0
         while True:
             self.clear_screen()
             self.display_header()
-            print(f'  {_DIM}Resume session{_RST}\n')
+            print(f'  {_DIM}Resume session{_RST}\\n')
 
             try:
                 rows = os.get_terminal_size().lines
@@ -596,39 +600,35 @@ class MenuSystem:
 
             try:
                 ch = self.getch_unix()
-                if ch == '\x1b':
+                if ch == '\\x1b':
                     self.getch_unix()
                     ch = self.getch_unix()
                     if ch == 'A':
                         selected = (selected - 1) % len(sessions)
                     elif ch == 'B':
                         selected = (selected + 1) % len(sessions)
-                elif ch in ('\r', '\n'):
+                elif ch in ('\\r', '\\n'):
                     s = sessions[selected]
-                    cmd = ['python3', 'agent.py', '--resume', s['file']]
-                    if s['provider'] and s['provider'] != '?':
-                        cmd.extend(['--provider', s['provider']])
-                    if s['model']:
-                        cmd.extend(['--model', s['model']])
-                    if follow_up_task:
-                        cmd.append(follow_up_task)
-                    result = subprocess.run(cmd, cwd=SCRIPT_DIR, env=os.environ.copy())
-                    sys.exit(result.returncode)
+                    # Load session file and return resume_data (instead of subprocess call)
+                    try:
+                        resume_data = json.loads(Path(s['file']).read_text())
+                        return {'resume_data': resume_data, 'follow_up': follow_up_task}
+                    except Exception as e:
+                        print(f'  {_RED}✗ Failed to load session: {e}{_RST}')
+                        return None
                 elif ch.lower() == 'q':
-                    return
+                    return None
                 elif ch.isdigit():
                     idx = int(ch) - 1
                     if 0 <= idx < len(sessions):
                         s = sessions[idx]
-                        cmd = ['python3', 'agent.py', '--resume', s['file']]
-                        if s['provider'] and s['provider'] != '?':
-                            cmd.extend(['--provider', s['provider']])
-                        if s['model']:
-                            cmd.extend(['--model', s['model']])
-                        if follow_up_task:
-                            cmd.append(follow_up_task)
-                        result = subprocess.run(cmd, cwd=SCRIPT_DIR, env=os.environ.copy())
-                        sys.exit(result.returncode)
+                        # Load session file and return resume_data (instead of subprocess call)
+                        try:
+                            resume_data = json.loads(Path(s['file']).read_text())
+                            return {'resume_data': resume_data, 'follow_up': follow_up_task}
+                        except Exception as e:
+                            print(f'  {_RED}✗ Failed to load session: {e}{_RST}')
+                            return None
             except Exception:
                 return
 
@@ -665,7 +665,7 @@ class MenuSystem:
             print(f' {_RED}✗{_RST} {e}')
             sys.exit(1)
 
-    def _execute_agent(self, provider_name, model, task):
+    def _execute_agent(self, provider_name, model, task, steer_queue=None, stop_event=None, resume_data=None):
         """Execute agent directly (no subprocess) or via subprocess if import fails."""
         if _AGENT_DIRECT:
             try:
@@ -684,7 +684,7 @@ class MenuSystem:
                     provider = OllamaProvider(model=model or default_model)
 
                 # Run agent directly in same process
-                run_agent(provider, task, max_turns=50, confirm=True, resume_data=None)
+                run_agent(provider, task, max_turns=50, confirm=False, resume_data=resume_data, tui_mode=True, stop_event=stop_event)
                 # Don't exit — return to menu for next task
                 return
             except Exception as e:
@@ -708,375 +708,513 @@ class MenuSystem:
             if model not in self.providers[provider]['models']:
                 model = list(self.providers[provider]['models'].keys())[0]
 
-            # Use fixed input area with patch_stdout if prompt_toolkit available
-            if _PT_AVAILABLE:
-                self._run_with_fixed_input(provider, model, initial_task=initial_task)
-            else:
-                self._run_fallback(provider, model, initial_task=initial_task)
+            # Always use Hermes-style fixed-input TUI
+            self._run_with_fixed_input(provider, model, initial_task=initial_task)
 
         except KeyboardInterrupt:
             print(f'\n {_DIM}quit{_RST}')
             sys.exit(1)
 
     def _run_with_fixed_input(self, provider, model, initial_task=None):
-        """Run with fixed input prompt using terminal control sequences.
-
-        Creates a Hermes-like TUI with:
-        - Scrollable output region (top) using DECSTBM
-        - Fixed input prompt (bottom)
-        - Background agent execution with output capture
-        - Proper steering: Enter=execute, Ctrl+C=interrupt, Esc=steer
-        - Thread-safe output buffering
-        """
+        """Hermes-style fixed input TUI with slash picker, steering, and safe interrupts."""
         import io
-        import sys
-        import threading
-        from time import sleep
+        import re
+        import time
         import select
+        import fcntl
+        import threading as _threading
 
-        # Set up scroll region: reserve bottom 2 lines for status bar and input/prompt
+        _real_stdout = sys.stdout
+        _real_stdin = sys.stdin
+
         try:
-            rows = os.get_terminal_size().lines
-            cols = os.get_terminal_size().columns
-        except Exception:
-            rows, cols = 24, 80  # fallback
+            rows, cols = os.get_terminal_size()
+        except OSError:
+            rows, cols = 24, 80
 
-        # Set scroll region: lines 1 to (rows-3) for output, leave lines (rows-2) to rows for status+input
-        sys.stdout.write(f'\033[1;{rows-3}r')  # Scroll region: top to (rows-3)
-        sys.stdout.flush()
+        output_lines = []
+        output_lock = _threading.Lock()
+        import queue
+        steer_queue = queue.Queue()
 
-        # Shared state between threads
-        output_lines = []  # Scrollback buffer
-        output_lock = threading.Lock()
-        agent_thread = None
         agent_running = False
+        agent_stop_event = None
         exit_requested = False
-        steer_mode = False
-        current_input = ""
-        input_history = []  # For up/down arrows
+        current_input = ''
+        input_history = []
         history_index = -1
+        current_task = ''
+        current_turn = 0
+        pending_menu = None
+        session_start = time.time()
+
+        SLASH_COMMANDS_LOCAL = [
+            ('/new',      'Start a new session (fresh context)'),
+            ('/reset',    'Start a new session (fresh context)'),
+            ('/clear',    'Clear screen and keep current session'),
+            ('/history',  'Show conversation history'),
+            ('/save',     'Save current session state'),
+            ('/retry',    'Retry the last user message'),
+            ('/undo',     'Remove last exchange from local buffer'),
+            ('/title',    'Set title for current session'),
+            ('/branch',   'Branch current session (snapshot)'),
+            ('/fork',     'Branch current session (snapshot)'),
+            ('/compress', 'Compress conversation context'),
+            ('/rollback', 'Restore previous checkpoint'),
+            ('/provider', 'Switch AI provider'),
+            ('/model',    'Switch AI model'),
+            ('/resume',   'Resume a previous session'),
+            ('/help',     'Show all slash commands'),
+            ('/status',   'Show provider/session status'),
+            ('/quit',     'Exit ForestGump'),
+        ]
+        slash_picker_active = False
+        slash_picker_idx = 0
+        slash_filter = ''
+        slash_list_count = 0
+
+        class _RealtimeCapture(io.StringIO):
+            def __init__(self, cb):
+                super().__init__()
+                self._cb = cb
+            def write(self, s):
+                if s:
+                    self._cb(s)
+                return super().write(s)
 
         def add_output(text):
-            """Add text to scrollback buffer (thread-safe)"""
             if not text:
                 return
+            clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07', '', text)
             with output_lock:
-                for line in text.rstrip('\n').split('\n'):
-                    output_lines.append(line)
-                # Keep last 500 lines in memory, display last 200
-                if len(output_lines) > 500:
-                    output_lines[:] = output_lines[-500:]
+                for line in clean.rstrip('\n').split('\n'):
+                    if '\r' in line:
+                        parts = line.split('\r')
+                        line = next((x.strip() for x in reversed(parts) if x.strip()), '')
+                    if line.strip():
+                        output_lines.append(line)
+                output_lines[:] = output_lines[-500:]
 
         def get_display_lines():
-            """Get lines to display in scrollable region"""
+            try:
+                rows2, _ = os.get_terminal_size()
+            except OSError:
+                rows2 = 24
+            max_lines = rows2 - 5
             with output_lock:
-                start_idx = max(0, len(output_lines) - (rows - 4))  # Leave room for status bar+prompt
-                return output_lines[start_idx:]
+                return output_lines[-max(1, max_lines):]
 
-        def get_status_text():
-            """Get Hermes-like status bar text"""
-            # Track elapsed time for demo purposes
-            import time
-            if not hasattr(get_status_text, 'start_time'):
-                get_status_text.start_time = time.time()
+        def get_status_lines():
+            elapsed = time.time() - session_start
+            minutes = int(elapsed // 60)
+            seconds = int(elapsed % 60)
+            time_str = f'{minutes}m{seconds:02d}s' if minutes > 0 else f'{seconds}s'
+            state = 'running' if agent_running else 'idle'
+            model_display = model[:20] if len(model) > 20 else model
+            try:
+                from agent import _bar_state as _agent_bar
+                live_turn = _agent_bar.get('turn', 0)
+                live_action = _agent_bar.get('action', '')
+                if live_turn:
+                    turn_str = f'turn {live_turn}'
+                    if live_action:
+                        turn_str += f' · {live_action[:20]}'
+                else:
+                    turn_str = 'turn 0'
+            except Exception:
+                turn_str = f'turn {current_turn}' if current_turn > 0 else 'turn 0'
 
-            elapsed_seconds = int(time.time() - get_status_text.start_time)
-            minutes = elapsed_seconds // 60
-            seconds = elapsed_seconds % 60
-
-            # Format time as MM:SS or just Mm if under an hour
-            if minutes > 0:
-                time_str = f'{minutes}m{seconds:02d}s' if seconds > 0 else f'{minutes}m'
+            if current_task:
+                try:
+                    cols3 = os.get_terminal_size().columns
+                except OSError:
+                    cols3 = 80
+                max_task = max(10, cols3 - 4)
+                task_display = current_task[:max_task] + ('…' if len(current_task) > max_task else '')
+                mission = f' ◈ {task_display}'
             else:
-                time_str = f'{seconds}s'
+                mission = ' ◈ ForestGump — ready'
+            stats = f' ⚕ {model_display} │ 100K/400K │ [██░░░░░░░░] 25% │ {time_str}'
+            return mission, stats
 
-            # Simulate token usage and progress (in real implementation, this comes from agent)
-            # For demo, show some fake progress based on time
-            progress_percent = min(95, (elapsed_seconds % 30) * 3)  # Cycle 0-95% every 30 seconds
-            filled_blocks = int(progress_percent / 10)  # Each block represents 10%
-            empty_blocks = 10 - filled_blocks
-            progress_bar = '[' + '█' * filled_blocks + '░' * empty_blocks + f'] {progress_percent}%'
-
-            # Simulate token usage (fake numbers for demo)
-            used_tokens = (elapsed_seconds * 100) % 50000  # Cycle through 0-50K tokens
-            max_tokens = 100000  # 100K max
-            tokens_str = f'{used_tokens//1000}K/{max_tokens//1000}K'
-
-            # Format: ⚕ provider │ model │ tokens │ progress │ time
-            # Truncate model name if too long
-            model_display = model[:12].ljust(12) if len(model) > 12 else model.ljust(12)
-
-            status_line = (
-                f'⚕ {provider:<8} │ {model_display} │ {tokens_str} │ {progress_bar} │ {time_str}'
-            )
-            return status_line
+        def _draw_slash_picker():
+            out = _real_stdout
+            filtered = [(cmd, desc) for cmd, desc in SLASH_COMMANDS_LOCAL if slash_filter == '' or slash_filter in cmd][:12]
+            # Draw BELOW the prompt line (Hermes-like): write new lines after prompt
+            out.write('\n' + '─' * max(20, cols) + '\n')
+            for i, (cmd, desc) in enumerate(filtered):
+                marker = '▶ ' if i == slash_picker_idx % max(1, len(filtered)) else '  '
+                out.write(f' {marker}{cmd:<36} {desc[:max(10, cols-42)]}\n')
+            out.flush()
 
         def redisplay_screen():
-            """Redraw the entire screen: scrollable output + status bar + fixed input prompt"""
-            # Save cursor position
-            sys.stdout.write('\033[s')
-
-            # Clear screen and reset to home
-            sys.stdout.write('\033[2J\033[H')
-
-            # Display scrollable output (in scroll region)
+            nonlocal rows, cols
+            try:
+                rows, cols = os.get_terminal_size()
+            except OSError:
+                rows, cols = 24, 80
+            out = _real_stdout
+            out.write('\033[2J\033[H')
             output_text = '\n'.join(get_display_lines())
             if output_text:
-                sys.stdout.write(output_text + '\n')
+                out.write(output_text + '\n')
+            mission_line, stats_line = get_status_lines()
+            out.write('\033[{};1H'.format(rows-3)); out.write('\033[2K'); out.write(mission_line)
+            out.write('\033[{};1H'.format(rows-2)); out.write('\033[2K'); out.write(stats_line)
+            out.write('\033[{};1H'.format(rows)); out.write('\033[2K'); out.write(' ❯ ' + current_input)
+            if slash_picker_active:
+                _draw_slash_picker()
+            out.flush()
 
-            # Display status bar on line rows-2
-            sys.stdout.write(f'\033[{rows-2};1H')  # Row 'rows-2', column 1
-            sys.stdout.write('\033[2K')  # Clear line
-            status_text = get_status_text()
-            sys.stdout.write(status_text)
-
-            # Position cursor at bottom row for input prompt
-            sys.stdout.write(f'\033[{rows};1H')  # Row 'rows', column 1
-
-            # Clear input line
-            sys.stdout.write('\033[2K')
-
-            # Show prompt and current input
-            if steer_mode:
-                prompt = f'  {_DIM}steer:{_RST} '
-            else:
-                prompt = f' {_GLD}❯{_RST} '
-
-            sys.stdout.write(prompt)
-            sys.stdout.write(current_input)
-            sys.stdout.flush()
-
-            # Position cursor at end of input
-            # Calculate visible prompt length (stripping ANSI codes)
-            prompt_plain = prompt
-            if USE_COLOR:
-                import re
-                prompt_plain = re.sub(r'\033\[[0-9;]*m', '', prompt)
-            cursor_pos = len(current_input) + len(prompt_plain) + 1  # +1 for the space after >
-            sys.stdout.write(f'\033[{rows};{cursor_pos}H')
-            sys.stdout.flush()
-
-        def handle_input_key(key):
-            """Handle keyboard input for the fixed prompt"""
-            nonlocal current_input, input_history, history_index, steer_mode, exit_requested
-
-            if key == '\r':  # Enter
-                if current_input.strip():
-                    # Add to history
-                    if current_input.strip() not in input_history:
-                        input_history.append(current_input.strip())
-                        # Save to file
-                        try:
-                            with open(SCRIPT_DIR / '.prompt_history', 'a') as f:
-                                f.write(current_input.strip() + '\n')
-                        except:
-                            pass
-
-                    # Process the command
-                    task = current_input.strip()
-                    add_output(f'\n{_GLD}❯ {_RST}{task}\n')  # Echo the command
-
-                    # Handle slash commands
-                    if task.lower() == '/provider':
-                        provider_names = list(self.providers.keys())
-                        provider_labels = [self.providers[p]['label'] for p in provider_names]
-                        provider_descs = [self.providers[p]['desc'] for p in provider_names]
-                        provider_idx = self.show_menu('Select Provider', provider_labels, provider_descs)
-                        provider = provider_names[provider_idx]
-                        model = self._pick_model(provider)
-                        _save_config({'provider': provider, 'model': model})
-                        current_input = ""
-                        history_index = -1
-                        redisplay_screen()
-                        return
-
-                    if task.lower() == '/model':
-                        model = self._pick_model(provider)
-                        _save_config({'provider': provider, 'model': model})
-                        current_input = ""
-                        history_index = -1
-                        redisplay_screen()
-                        return
-
-                    if task.lower().startswith('/resume'):
-                        follow_up = task[7:].strip()
-                        self._pick_session(follow_up_task=follow_up)
-                        exit_requested = True
-                        return
-
-                    # Execute agent in background
-                    self._save_history(provider, model, task)
-                    _save_config({'provider': provider, 'model': model})
-                    add_output(f'\n  {_GLD}⚔ bash{_RST}\n')
-                    # Reset input after sending command to agent
-                    current_input = ""
-                    history_index = -1
-
-                    # Reset input
-                    current_input = ""
-                    history_index = -1
-
-                    # Start agent in background thread
-                    def run_agent_bg():
-                        nonlocal agent_running
-                        agent_running = True
-                        redisplay_screen()  # Show agent started
-
-                        # Capture agent output
-                        old_stdout, old_stderr = sys.stdout, sys.stderr
-                        try:
-                            capture = io.StringIO()
-                            sys.stdout = capture
-                            sys.stderr = capture
-
-                            self._execute_agent(provider, model, task)
-
-                            # Get captured output
-                            output = capture.getvalue()
-                            if output:
-                                add_output(output)
-                        finally:
-                            sys.stdout, sys.stderr = old_stdout, old_stderr
-                            agent_running = False
-                            redisplay_screen()  # Update display when done
-
-                    agent_thread = threading.Thread(target=run_agent_bg, daemon=True)
-                    agent_thread.start()
-
-            elif key == '\x03':  # Ctrl+C
-                if agent_running:
-                    # Interrupt the agent (this would need cooperation from agent thread)
-                    # For now, just signal that we want to interrupt
-                    add_output(f'\n  {_DIM}Interrupted by user{_RST}\n')
+        def _execute_slash(cmd):
+            nonlocal provider, model, exit_requested, pending_menu, flags, fd
+            c = cmd.strip().lower()
+            if c == '/help':
+                add_output('')
+                add_output('  Slash Commands')
+                for sc, sd in SLASH_COMMANDS_LOCAL:
+                    add_output(f'    {sc:<14} {sd}')
+                add_output('  Tip: type / to open picker  •  Ctrl+C to interrupt agent')
+            elif c == '/provider':
+                pending_menu = 'provider'
+            elif c == '/model':
+                pending_menu = 'model'
+            elif c == '/resume':
+                result = self._pick_session()
+                if result:
+                    resume_data = result['resume_data']
+                    follow_up = result['follow_up']
+                    # Load the previous session's provider/model if available
+                    if 'provider' in resume_data:
+                        provider = resume_data['provider']
+                    if 'model' in resume_data:
+                        model = resume_data['model']
+                    # Create task for resume (include follow_up if provided)
+                    task = resume_data.get('task', '') or '(continue)'
+                    if follow_up:
+                        task = follow_up
+                    # Mark that we're resuming
+                    output_lines.clear()
+                    add_output(f'  ◈ Resuming session with {provider}:{model}')
+                    # Run agent with resume_data (don't spawn thread, let it run inline)
+                    agent_running = True
+                    
+                    # CRITICAL: Restore raw mode before agent (it was disabled by _pick_session menu)
+                    try:
+                        tty.setcbreak(fd)
+                        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                    except:
+                        pass
+                    
+                    self._execute_agent(provider, model, task, steer_queue=steer_queue, stop_event=stop_event, resume_data=resume_data)
                     agent_running = False
+                    
+                    # CRITICAL: Re-establish raw mode after agent (agent may have modified terminal)
+                    try:
+                        tty.setcbreak(fd)
+                        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                    except:
+                        pass
+                    
+                    # Redraw screen and clear input after resume
+                    current_input = ''
                     redisplay_screen()
                 else:
-                    # No agent running, exit the TUI
-                    exit_requested = True
+                    add_output('  (resume cancelled)')
+            elif c in ('/new', '/reset'):
+                output_lines.clear(); add_output('  ◈ New session started')
+            elif c == '/clear':
+                output_lines.clear(); add_output('  ◈ Screen cleared')
+            elif c == '/history':
+                add_output('  Recent history:')
+                for h in self.history[-10:]:
+                    ts = h.get('timestamp', '')
+                    task = h.get('task', '')
+                    add_output(f'    - {ts[:19]}  {task[:80]}')
+            elif c == '/save':
+                _save_config({'provider': provider, 'model': model}); add_output('  ✓ Session state saved')
+            elif c == '/retry':
+                add_output('  (retry) submit the same prompt again manually for now')
+            elif c == '/undo':
+                if output_lines:
+                    output_lines.pop()
+                add_output('  ✓ Last line removed')
+            elif c == '/title':
+                add_output('  (title) not implemented yet')
+            elif c in ('/branch', '/fork'):
+                add_output('  (branch/fork) not implemented yet')
+            elif c == '/compress':
+                add_output('  (compress) not implemented yet')
+            elif c == '/rollback':
+                add_output('  (rollback) not implemented yet')
+            elif c == '/status':
+                m, s = get_status_lines(); add_output(m); add_output(s)
+            elif c == '/quit':
+                exit_requested = True
 
-            elif key == '\x1b':  # Esc - enter steer mode
-                steer_mode = True
-                current_input = ""
-                history_index = -1
+        def handle_input_key(key):
+            nonlocal current_input, history_index, slash_picker_active, slash_picker_idx, slash_filter
+            nonlocal exit_requested, pending_menu, agent_running, agent_stop_event
+            nonlocal current_task, current_turn
+
+            if slash_picker_active:
+                filtered = [(cmd, desc) for cmd, desc in SLASH_COMMANDS_LOCAL if slash_filter == '' or slash_filter in cmd]
+                if key in ('\x1b[A', '[A', '\x1bOA', 'OA'):
+                    slash_picker_idx = (slash_picker_idx - 1) % max(1, len(filtered)); redisplay_screen(); return
+                if key in ('\x1b[B', '[B', '\x1bOB', 'OB'):
+                    slash_picker_idx = (slash_picker_idx + 1) % max(1, len(filtered)); redisplay_screen(); return
+                if key in ('\r', '\n'):
+                    chosen = filtered[slash_picker_idx % len(filtered)][0] if filtered else current_input
+                    # slash list is overlay-only; nothing to clear
+                    slash_picker_active = False; slash_filter = ''; current_input = ''
+                    _execute_slash(chosen); redisplay_screen(); return
+                if key == '\x1b':
+                    # Bare ESC only dismisses picker; '[A'/'[B' are handled as arrows
+                    # slash list is overlay-only; nothing to clear
+                    slash_picker_active = False; slash_filter = ''; current_input = ''; redisplay_screen(); return
+                if key in ('\x7f', '\x08'):
+                    if slash_filter:
+                        slash_filter = slash_filter[:-1]
+                        current_input = '/' + slash_filter
+                    else:
+                        # slash list is overlay-only; nothing to clear
+                        slash_picker_active = False
+                        current_input = ''
+                    redisplay_screen(); return
+                if len(key) == 1 and ord(key) >= 32:
+                    slash_filter += key
+                    current_input = '/' + slash_filter
+                    slash_picker_idx = 0
+                    redisplay_screen()
+                    return
+                return
+
+            if key == '/' and not current_input:
+                slash_picker_active = True
+                slash_picker_idx = 0
+                slash_filter = ''
+                current_input = '/'
+                # Fallback visibility disabled now that picker draws below prompt
+                redisplay_screen()
+                return
+
+            if key in ('\r', '\n'):
+                text = current_input.strip()
+                current_input = ''; history_index = -1
+                if not text:
+                    redisplay_screen(); return
+                if text not in input_history:
+                    input_history.append(text)
+                    try:
+                        with open(SCRIPT_DIR / '.prompt_history', 'a') as f:
+                            f.write(text + '\n')
+                    except Exception:
+                        pass
+                if text.startswith('/'):
+                    _execute_slash(text); redisplay_screen(); return
+                if agent_running:
+                    add_output(f'  → steering: {text}')
+                    steer_queue.put(text)
+                    redisplay_screen(); return
+
+                add_output(f'  ❯ {text}')
+                self._save_history(provider, model, text)
+                _save_config({'provider': provider, 'model': model})
+                agent_stop_event = _threading.Event()
+                agent_running = True
+                current_task = text
+                current_turn = 0
+
+                def run_agent_bg(task=text):
+                    nonlocal agent_running, current_task, current_turn, agent_stop_event
+                    old_stdout, old_stderr, old_stdin = sys.stdout, sys.stderr, sys.stdin
+                    try:
+                        sys.stdout = _RealtimeCapture(add_output)
+                        sys.stderr = sys.stdout
+
+                        class _SteerStdin:
+                            def isatty(self): return False
+                            def read(self, n=1): return ''
+                            def readline(self):
+                                try:
+                                    return steer_queue.get_nowait() + '\n'
+                                except Exception:
+                                    return ''
+                            def fileno(self): raise IOError('no fileno')
+
+                        sys.stdin = _SteerStdin()
+                        self._execute_agent(provider, model, task, steer_queue=steer_queue, stop_event=agent_stop_event)
+                    except Exception as e:
+                        import traceback
+                        add_output(f'  [!] Agent error: {e}')
+                        add_output(traceback.format_exc())
+                    finally:
+                        sys.stdout, sys.stderr, sys.stdin = old_stdout, old_stderr, old_stdin
+                        agent_running = False
+                        redisplay_screen()
+
+                _threading.Thread(target=run_agent_bg, daemon=True).start()
+                redisplay_screen(); return
+
+            if key in ('\x7f', '\x08'):
+                current_input = current_input[:-1]; redisplay_screen(); return
+
+            if key in ('\x03',):
+                # slash list is overlay-only; nothing to clear
+                if agent_running:
+                    if agent_stop_event: agent_stop_event.set()
+                    add_output('  ↯ Interrupted — agent stopping after current turn')
+                    redisplay_screen()
+                else:
+                    exit_requested = True
+                return
+
+            if key == '\x1b':
+                if agent_running:
+                    if agent_stop_event: agent_stop_event.set()
+                    add_output('  ↯ Interrupted — agent stopping after current turn')
+                else:
+                    current_input = ''; history_index = -1; slash_picker_active = False; slash_filter = ''
+                redisplay_screen(); return
+
+            if key in ('\x1b[A', '[A', '\x1bOA', 'OA'):
+                if input_history:
+                    history_index = min(history_index + 1, len(input_history) - 1)
+                    current_input = input_history[-(history_index + 1)]
+                    redisplay_screen()
+                return
+
+            if key in ('\x1b[B', '[B', '\x1bOB', 'OB'):
+                if history_index > 0:
+                    history_index -= 1
+                    current_input = input_history[-(history_index + 1)]
+                else:
+                    history_index = -1
+                    current_input = ''
+                redisplay_screen(); return
+
+            if len(key) == 1 and ord(key) >= 32:
+                current_input += key
                 redisplay_screen()
 
-            elif key == '\x7f' or key == '\x08':  # Backspace
-                if not steer_mode and current_input:
-                    current_input = current_input[:-1]
-                    redisplay_screen()
-
-            elif key == '\x1b[A':  # Up arrow
-                if not steer_mode and input_history:
-                    if history_index < 0:
-                        history_index = len(input_history) - 1
-                    elif history_index > 0:
-                        history_index -= 1
-                    current_input = input_history[history_index]
-                    redisplay_screen()
-
-            elif key == '\x1b[B':  # Down arrow
-                if not steer_mode and input_history:
-                    if history_index >= len(input_history) - 1:
-                        history_index = -1
-                        current_input = ""
-                    elif history_index >= 0:
-                        history_index += 1
-                        current_input = input_history[history_index]
-                    redisplay_screen()
-
-            elif key >= ' ' and key <= '~':  # Printable characters
-                if not steer_mode:
-                    current_input += key
-                    redisplay_screen()
-
-        # Initial screen setup
         add_output('')
-        add_output(f'  {_GLD}⚕{_RST} {_BLD}Forest Gump{_RST}')
-        add_output(f'  {_DIM}Provider{_RST}  {_GLD}{provider}{_RST}  {_DIM}{model}{_RST}')
+        add_output('  ⚕ Forest Gump')
+        add_output(f'  Provider  {provider}  {model}')
+        add_output('  Commands')
+        add_output('    /new       Start a new session')
+        add_output('    /provider  Switch AI provider')
+        add_output('    /model     Switch AI model')
+        add_output('    /resume    Resume previous session')
+        add_output('    /help      Show all slash commands')
 
-        # Available tools
-        tools = {
-            'bash': 'Shell execution',
-            'memory': 'Persistent facts & credentials',
-            'skills': 'Learned attack patterns',
-            'pty': 'Interactive terminal',
-        }
-        add_output(f'\n  {_DIM}Available Tools{_RST}')
-        for tool, desc in tools.items():
-            output_buf.append(f'    {_GLD}•{_RST}  {tool:<12}  {_DIM}{desc}{_RST}')
-
-        # Available skills (from database)
-        try:
-            from skills import search_skills
-            all_skills = search_skills('')
-            skill_count = len(all_skills) if all_skills else 0
-            add_output(f'\n  {_DIM}Learned Skills{_RST}')
-            if skill_count > 0:
-                output_buf.append(f'    {skill_count} patterns stored  {_DIM}(search with task keywords){_RST}')
-                # Show top 3 by success rate
-                for skill in sorted(all_skills, key=lambda s: s.get('success_rate', 0), reverse=True)[:3]:
-                    rate = f"{skill.get('success_rate', 0):.0%}"
-                    output_buf.append(f'      {_GLD}▸{_RST}  {skill.get("name", "?")[:30]:<30}  {_DIM}{rate}{_RST}')
-            else:
-                output_buf.append(f'    {_DIM}(None yet — skills learned after successful runs){_RST}')
-        except:
-            output_buf.append(f'\n  {_DIM}Learned Skills{_RST}')
-            output_buf.append(f'    {_DIM}(Database not initialized){_RST}')
-
-        if self.history:
-            entry = self.history[-1]
-            add_output(f'\n  {_DIM}Recent{_RST}')
-            add_output(f'    {_DIM}[{datetime.fromisoformat(entry["timestamp"]).strftime("%H:%M")}]{_RST}  {entry["task"][:50]}')
-
-        add_output(f'\n  {_DIM}Commands{_RST}')
-        add_output(f'    {_GLD}/provider{_RST}  Switch AI provider')
-        add_output(f'    {_GLD}/model{_RST}     Switch AI model')
-        add_output(f'    {_GLD}/resume{_RST}    Resume previous session')
-        add_output('')
-
-        # Load input history from file
         try:
             if Path(SCRIPT_DIR / '.prompt_history').exists():
                 with open(SCRIPT_DIR / '.prompt_history', 'r') as f:
                     input_history = [line.strip() for line in f.readlines() if line.strip()]
-        except:
+        except Exception:
             input_history = []
 
-        # Initial display
         redisplay_screen()
 
-        # Main input loop
         try:
-            fd = sys.stdin.fileno()
+            fd = _real_stdin.fileno()
             old_settings = termios.tcgetattr(fd)
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            tty.setcbreak(fd)
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+            _real_stdout.write('\033[?2004h')
+            _real_stdout.flush()
 
-            try:
-                tty.setcbreak(fd)  # Allow reading single characters
+            while not exit_requested:
+                try:
+                    b = os.read(fd, 1)
+                    char = b.decode('utf-8', errors='replace')
+                    if char == '\x1b':
+                        # Robust escape-sequence collection from raw fd
+                        rest = ''
+                        fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+                        try:
+                            for _ in range(8):
+                                rdy, _, _ = select.select([fd], [], [], 0.03)
+                                if not rdy:
+                                    break
+                                c = os.read(fd, 1).decode('utf-8', errors='replace')
+                                rest += c
+                                if c and (c[-1].isalpha() or c[-1] in ('~',)):
+                                    break
+                        finally:
+                            fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                        char = '\x1b' + rest
 
-                while not exit_requested:
-                    # Check for input (non-blocking)
-                    if sys.stdin in select.select([sys.stdin], [], [], 0.1)[0]:
-                        char = sys.stdin.read(1)
-                        if char:
-                            handle_input_key(char)
+                        if char == '\x1b[200~':
+                            paste_buf = ''
+                            fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+                            try:
+                                while True:
+                                    rdy, _, _ = select.select([_real_stdin], [], [], 1.0)
+                                    if not rdy:
+                                        break
+                                    c = os.read(fd, 128).decode('utf-8', errors='replace')
+                                    if '\x1b[201~' in c:
+                                        paste_buf += c.split('\x1b[201~')[0]
+                                        break
+                                    paste_buf += c
+                            finally:
+                                fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                            first_line = paste_buf.split('\n')[0].rstrip('\r')
+                            current_input += first_line
+                            redisplay_screen()
+                            char = ''
 
-                    # Update display periodically to show agent output
-                    sleep(0.1)
+                    if char:
+                        handle_input_key(char)
+                except (IOError, BlockingIOError, OSError):
+                    pass
+
+                if pending_menu:
+                    _real_stdout.write('\033[?2004l')
+                    _real_stdout.flush()
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    try:
+                        if pending_menu == 'provider':
+                            provider_names = list(self.providers.keys())
+                            provider_labels = [self.providers[p]['label'] for p in provider_names]
+                            provider_descs = [self.providers[p]['desc'] for p in provider_names]
+                            provider_idx = self.show_menu('Select Provider', provider_labels, provider_descs)
+                            if provider_idx is not None and 0 <= provider_idx < len(provider_names):
+                                provider = provider_names[provider_idx]
+                                model = self._pick_model(provider)
+                                _save_config({'provider': provider, 'model': model})
+                        elif pending_menu == 'model':
+                            model = self._pick_model(provider)
+                            _save_config({'provider': provider, 'model': model})
+                    finally:
+                        pending_menu = None
+                        try:
+                            tty.setcbreak(fd)
+                            _real_stdout.write('\033[?2004h')
+                            _real_stdout.flush()
+                            fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                        except Exception:
+                            pass
                     redisplay_screen()
 
-            finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                time.sleep(0.05)
 
         except KeyboardInterrupt:
             pass
         finally:
-            # Restore full scroll region
-            sys.stdout.write(f'\033[1;{rows}r')
-            sys.stdout.flush()
-
-            # Clear screen on exit
-            sys.stdout.write('\033[2J\033[H')
-            sys.stdout.flush()
+            try:
+                _real_stdout.write('\033[?2004l')
+                _real_stdout.flush()
+            except Exception:
+                pass
+            try:
+                termios.tcsetattr(_real_stdin.fileno(), termios.TCSADRAIN, old_settings)
+            except Exception:
+                pass
+            _real_stdout.write('\033[2J\033[H')
+            _real_stdout.flush()
 
     def _run_fallback(self, provider, model, initial_task=None):
         """Fallback to raw terminal input without fixed input area."""

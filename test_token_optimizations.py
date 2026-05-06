@@ -35,7 +35,7 @@ def test_compress_command_output():
     assert len(compressed) < len(large), "Large output should be compressed"
     assert 'line 0' in compressed, "First lines should be present"
     assert 'line 99' in compressed, "Last lines should be present"
-    assert '...' in compressed, "Should have ellipsis marker"
+    assert '↓' in compressed, "Should have skip marker"
     reduction = (1 - len(compressed) / len(large)) * 100
     print(f'✓ compress_command_output: {reduction:.0f}% reduction on 100-line output')
 

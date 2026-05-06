@@ -57,7 +57,10 @@ class MemorySystem:
             pass
 
     def _save(self):
-        """Persist memory to disk."""
+        """Persist memory to disk with atomic writes and backup."""
+        import os
+        import tempfile
+        
         # Create directory if needed
         self.memory_file.parent.mkdir(parents=True, exist_ok=True)
         
@@ -68,8 +71,36 @@ class MemorySystem:
             "networks": {name: net.to_dict() for name, net in self.networks.items()},
         }
         
-        with open(self.memory_file, "w") as f:
-            json.dump(data, f, indent=2)
+        # Atomic write with backup: write to temp file first, then move
+        try:
+            # Write to temporary file
+            temp_fd, temp_path = tempfile.mkstemp(
+                dir=self.memory_file.parent,
+                prefix=".memory_tmp_",
+                suffix=".json"
+            )
+            
+            with os.fdopen(temp_fd, "w") as f:
+                json.dump(data, f, indent=2)
+            
+            # Set safe permissions on temp file before moving
+            os.chmod(temp_path, 0o600)
+            
+            # Create backup if file exists
+            if self.memory_file.exists():
+                backup_path = self.memory_file.with_suffix(".json.bak")
+                self.memory_file.replace(backup_path) if backup_path.exists() else None
+                Path(temp_path).replace(self.memory_file)
+                # Ensure proper permissions on final file
+                os.chmod(str(self.memory_file), 0o600)
+            else:
+                Path(temp_path).replace(self.memory_file)
+                os.chmod(str(self.memory_file), 0o600)
+        except Exception as e:
+            # Clean up temp file on error
+            if Path(temp_path).exists():
+                Path(temp_path).unlink()
+            raise e
 
     # ============ FACTS INTERFACE ============
     
@@ -243,6 +274,16 @@ class MemorySystem:
             List of network names
         """
         return list(self.networks.keys())
+    
+    def remove_network(self, name: str):
+        """Remove a network by name.
+        
+        Args:
+            name: Network name to remove
+        """
+        if name in self.networks:
+            del self.networks[name]
+            self._save()
 
     # ============ NOTES INTERFACE ============
     

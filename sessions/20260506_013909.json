@@ -1,0 +1,63 @@
+{
+  "task": "say hello",
+  "provider": "copilot/claude-haiku-4.5",
+  "turns": 2,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Task: say hello\n\nSend ONE command. Get output. Repeat."
+    },
+    {
+      "role": "assistant",
+      "content": "GitHub Copilot not available. Set GITHUB_COPILOT_TOKEN or run: gh auth login"
+    },
+    {
+      "role": "user",
+      "content": "No command detected. Use <cmd>...</cmd> to run a command or <done>...</done> if finished."
+    },
+    {
+      "role": "assistant",
+      "content": "GitHub Copilot not available. Set GITHUB_COPILOT_TOKEN or run: gh auth login"
+    },
+    {
+      "role": "user",
+      "content": "No command detected. Use <cmd>...</cmd> to run a command or <done>...</done> if finished."
+    }
+  ],
+  "log": [
+    {
+      "turn": 1,
+      "type": "thought",
+      "content": "GitHub Copilot not available. Set GITHUB_COPILOT_TOKEN or run: gh auth login",
+      "tokens": {
+        "error": true
+      },
+      "ts": 1778031549.8767893,
+      "llm_s": 0.1
+    },
+    {
+      "turn": 2,
+      "type": "thought",
+      "content": "GitHub Copilot not available. Set GITHUB_COPILOT_TOKEN or run: gh auth login",
+      "tokens": {
+        "error": true
+      },
+      "ts": 1778031549.9798577,
+      "llm_s": 0.1
+    }
+  ],
+  "memory": {
+    "facts": [],
+    "networks": {},
+    "credentials": {},
+    "notes": [],
+    "_migrated_techniques": true
+  },
+  "token_totals": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  },
+  "timestamp": "20260506_013909"
+}

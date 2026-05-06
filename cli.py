@@ -260,6 +260,99 @@ def cmd_config(args):
     return 0
 
 
+def cmd_gateway(args):
+    """Manage multi-channel gateways (Telegram, Discord, Slack, etc.)."""
+    from gateway import list_gateways, get_gateway
+    from pathlib import Path
+    import json
+
+    gateway_dir = Path.home() / '.forestgump' / 'gateways'
+
+    if args.list:
+        print(banner('\n📡 Available Gateways'))
+        for gw_name in list_gateways():
+            print(f'  • {gw_name.upper()}')
+        print(f'\n{info("Configure")} forestgump gateway setup [telegram|discord|slack]')
+        return 0
+
+    if args.setup:
+        gateway_name = args.setup.lower()
+        gw_class = get_gateway(gateway_name)
+
+        if not gw_class:
+            print(error(f'Unknown gateway: {gateway_name}'))
+            return 1
+
+        # TODO: Interactive setup
+        print(warning(f'⚠️  Gateway setup not yet implemented for {gateway_name}'))
+        print(f'  Future: interactive token/config entry')
+        return 0
+
+    if args.status:
+        gateway_dir.mkdir(parents=True, exist_ok=True)
+        gateway_configs = list(gateway_dir.glob('*.json'))
+
+        if not gateway_configs:
+            print(info('  No configured gateways.'))
+            return 0
+
+        print(banner('\n📡 Gateway Status'))
+        for config_file in gateway_configs:
+            gw_name = config_file.stem
+            with open(config_file, 'r') as f:
+                config = json.load(f)
+            enabled = config.get('enabled', False)
+            status = '✅' if enabled else '⚠️'
+            print(f'  {status} {gw_name.upper()} - {"enabled" if enabled else "disabled"}')
+        return 0
+
+    return 0
+
+
+def cmd_schedule(args):
+    """Manage scheduled tasks."""
+    from scheduler import Scheduler
+
+    scheduler = Scheduler()
+
+    if args.list:
+        print(banner('\n⏰ Scheduled Tasks'))
+        tasks = scheduler.list_tasks()
+
+        if not tasks:
+            print(info('  No scheduled tasks yet.'))
+            return 0
+
+        for task in tasks[:20]:
+            status = '✅' if task.enabled else '⚠️'
+            print(f'  {status} {task.name}')
+            print(f'     Schedule: {task.schedule}')
+            print(f'     Provider: {task.provider}')
+        return 0
+
+    if args.add:
+        parts = args.add.split('|', 2)
+        if len(parts) < 3:
+            print(error('Usage: forestgump schedule --add "name|schedule|task"'))
+            print('Example: forestgump schedule --add "daily-recon|every day at 6am|scan networks"')
+            return 1
+
+        name, schedule, task = parts
+        task_id = scheduler.add_task(
+            name=name.strip(),
+            task_description=task.strip(),
+            schedule=schedule.strip(),
+            provider='claude',
+        )
+
+        print(success(f'✓ Task scheduled: {task_id}'))
+        print(f'  Name: {name}')
+        print(f'  Schedule: {schedule}')
+        return 0
+
+    return 0
+
+
 def cmd_version(args):
     """Show version information."""
     print(f'ForestGump v{__version__} (Hermes-compatible pentesting agent)')
@@ -317,6 +410,19 @@ def main():
     config_parser = subparsers.add_parser('config', help='Configure settings')
     config_parser.add_argument('--show', action='store_true', help='Show current config')
     config_parser.set_defaults(func=cmd_config)
+
+    # gateway
+    gateway_parser = subparsers.add_parser('gateway', help='Manage messaging gateways')
+    gateway_parser.add_argument('--list', action='store_true', help='List available gateways')
+    gateway_parser.add_argument('--setup', help='Setup a gateway (telegram|discord|slack)')
+    gateway_parser.add_argument('--status', action='store_true', help='Show gateway status')
+    gateway_parser.set_defaults(func=cmd_gateway)
+
+    # schedule
+    schedule_parser = subparsers.add_parser('schedule', help='Manage scheduled tasks')
+    schedule_parser.add_argument('--list', action='store_true', help='List scheduled tasks')
+    schedule_parser.add_argument('--add', help='Add task: "name|schedule|task"')
+    schedule_parser.set_defaults(func=cmd_schedule)
 
     # version
     version_parser = subparsers.add_parser('version', help='Show version')
