@@ -47,7 +47,28 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from skills import init_db as init_skills_db, skills_context, extract_skills_from_session, migrate_techniques_json, seed_bandit_skills
+# Import new skill manager (backward compatible with old skills.py)
+try:
+    from skill_manager import init_db as init_skills_db, skills_context, extract_skills_from_session, migrate_techniques_json, seed_bandit_skills
+except ImportError:
+    from skills import init_db as init_skills_db, skills_context, extract_skills_from_session, migrate_techniques_json, seed_bandit_skills
+
+# Import new memory and theme systems
+try:
+    from memory_manager import (
+        get_memory_context,
+        save_memory as save_memory_db,
+        search_memory,
+    )
+    MEMORY_MANAGER_AVAILABLE = True
+except ImportError:
+    MEMORY_MANAGER_AVAILABLE = False
+
+try:
+    import theme
+    THEME_AVAILABLE = True
+except ImportError:
+    THEME_AVAILABLE = False
 
 try:
     from rich.console import Console as _RichConsole
@@ -63,16 +84,29 @@ TECHNIQUES_FILE = SCRIPT_DIR / 'techniques.json'
 
 # ─── UI / Display ─────────────────────────────────────────────
 
-_USE_COLOR = os.environ.get('COLOR') == '1'
-_DIM = '\033[2m' if _USE_COLOR else ''
-_RST = '\033[0m' if _USE_COLOR else ''
-_BLD = '\033[1m' if _USE_COLOR else ''
-_GRN = '\033[32m' if _USE_COLOR else ''
-_RED = '\033[31m' if _USE_COLOR else ''
-_YLW = '\033[33m' if _USE_COLOR else ''
-_GLD = '\033[1;38;2;255;215;0m' if _USE_COLOR else ''  # #FFD700 gold (Hermes theme)
-_AMB = '\033[38;2;255;191;0m' if _USE_COLOR else ''   # #FFBF00 amber
-_BRZ = '\033[38;2;205;127;50m' if _USE_COLOR else ''  # #CD7F32 bronze
+# Use new theme system if available, otherwise fallback to direct ANSI codes
+if THEME_AVAILABLE:
+    _USE_COLOR = os.environ.get('COLOR', '1') == '1'
+    _DIM = theme.Colors.DIM
+    _RST = theme.Colors.RESET
+    _BLD = theme.Colors.BOLD
+    _GRN = theme.Colors.GREEN
+    _RED = theme.Colors.RED
+    _YLW = theme.Colors.YELLOW
+    _GLD = theme.Colors.GOLD
+    _AMB = theme.Colors.AMBER
+    _BRZ = theme.Colors.BRONZE
+else:
+    _USE_COLOR = os.environ.get('COLOR') == '1'
+    _DIM = '\033[2m' if _USE_COLOR else ''
+    _RST = '\033[0m' if _USE_COLOR else ''
+    _BLD = '\033[1m' if _USE_COLOR else ''
+    _GRN = '\033[32m' if _USE_COLOR else ''
+    _RED = '\033[31m' if _USE_COLOR else ''
+    _YLW = '\033[33m' if _USE_COLOR else ''
+    _GLD = '\033[1;38;2;255;215;0m' if _USE_COLOR else ''  # #FFD700 gold (Hermes theme)
+    _AMB = '\033[38;2;255;191;0m' if _USE_COLOR else ''   # #FFBF00 amber
+    _BRZ = '\033[38;2;205;127;50m' if _USE_COLOR else ''  # #CD7F32 bronze
 
 
 def print_finding(title, content):
@@ -143,8 +177,11 @@ def _bar_render():
     sys.stdout.flush()
 
 
-def _bar_setup():
+def _bar_setup(tui_mode=False):
     global _bar_active
+    if tui_mode:
+        _bar_state['_tui_mode'] = True
+        return
     try:
         rows = os.get_terminal_size().lines
         sys.stdout.write(f'\033[1;{rows - 2}r')
@@ -157,7 +194,10 @@ def _bar_setup():
 
 def _bar_teardown():
     global _bar_active
+    tui = _bar_state.pop('_tui_mode', False)
     _bar_active = False
+    if tui:
+        return
     try:
         rows = os.get_terminal_size().lines
         sys.stdout.write(
@@ -172,7 +212,8 @@ def _bar_teardown():
 
 def _bar_update(**kwargs):
     _bar_state.update(kwargs)
-    _bar_render()
+    if not _bar_state.get('_tui_mode'):
+        _bar_render()
 
 
 class Spinner:
@@ -581,85 +622,89 @@ class ClaudeCliProvider:
 
 
 class CopilotProvider:
-    """GitHub Copilot CLI provider.
+    """GitHub Copilot API provider with Claude Haiku 4.5.
 
-    Wraps `gh copilot -p` in non-interactive mode.
-    Shell/write tools are denied so Copilot CLI never executes commands
-    itself — ForestGump's own PTY loop stays in control.
-
-    Auth: uses existing `gh auth` session (no API key needed).
-    Install: curl -fsSL https://gh.io/copilot-install | bash
+    Uses direct API calls (OpenAI-compatible endpoint) instead of CLI.
+    Auth: GITHUB_COPILOT_TOKEN env var or existing `gh auth` session.
     """
 
-    def __init__(self, model='claude-sonnet-4.5'):
+    def __init__(self, model='claude-haiku-4-5'):
         self.model = model
         self.name = f'copilot/{model}'
+        self._api_key = os.environ.get('GITHUB_COPILOT_TOKEN')
+        self._available = self._check_availability()
 
-    def chat(self, messages, system):
-        """Send messages to Claude via GitHub Copilot CLI. Returns (response_text, usage_dict).
-
-        Note: Copilot CLI does not return token counts, so usage dict contains zeros.
-        """
-        # Build a single prompt from conversation history (same pattern as ClaudeCliProvider)
-        prompt_parts = [f'[System instructions]\n{system}']
-        for msg in messages:
-            role = msg['role']
-            content = msg['content']
-            if role == 'user':
-                prompt_parts.append(content)
-            elif role == 'assistant':
-                prompt_parts.append(f'[Previous response]\n{content}')
-
-        full_prompt = '\n\n'.join(prompt_parts)
-        # Remove null bytes and other dangerous chars from prompt before passing to subprocess
-        full_prompt = full_prompt.replace('\x00', '').replace('\r\n', '\n')
-
-        cmd = [
-            'gh', 'copilot',
-            '--model', self.model,
-            '--output-format', 'text',
-            '--no-custom-instructions',  # ForestGump supplies its own system prompt above
-            '--deny-tool=shell',         # ForestGump's PTY executes commands, not Copilot CLI
-            '--deny-tool=write',         # Same — no file writes by Copilot CLI itself
-            '-p', full_prompt,
-        ]
-
+    def _check_availability(self):
+        """Check if Copilot API is available (has token or gh auth)."""
+        # Try API key first
+        if self._api_key:
+            return True
+        
+        # Fallback: check gh CLI auth
         try:
             result = subprocess.run(
-                cmd,
+                ['gh', 'auth', 'status'],
                 capture_output=True,
-                text=False,  # Get bytes first to handle encoding issues gracefully
-                timeout=180,
+                timeout=5,
+                text=True,
             )
-        except subprocess.TimeoutExpired as e:
-            raise RuntimeError(f'Copilot CLI timeout (>180s)') from e
-        except Exception as e:
-            raise RuntimeError(f'Copilot CLI subprocess error: {e}') from e
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
 
-        if result.returncode != 0:
-            # Decode stderr/stdout carefully, replacing bad bytes
-            err_text = result.stderr.decode('utf-8', errors='replace').strip() if result.stderr else ''
-            out_text = result.stdout.decode('utf-8', errors='replace').strip() if result.stdout else ''
-            err_msg = (err_text or out_text or '(no error message)').replace('\x00', '')
-            raise RuntimeError(f'Copilot CLI error: {err_msg}')
-
-        # Decode output, aggressively removing null bytes and other problematic chars
+    def chat(self, messages, system):
+        """Send messages to Claude via GitHub Copilot API. Returns (response_text, usage_dict)."""
+        
+        if not self._available:
+            return 'GitHub Copilot not available. Set GITHUB_COPILOT_TOKEN or run: gh auth login', {'error': True}
+        
         try:
-            output = result.stdout.decode('utf-8', errors='replace').strip()
+            import requests
+        except ImportError:
+            return 'requests library required: pip install requests', {'error': True}
+        
+        # Build request payload (OpenAI-compatible API)
+        payload = {
+            'model': self.model,
+            'messages': messages,
+            'temperature': 0.7,
+            'max_tokens': 2048,
+        }
+        
+        if system:
+            payload['messages'] = [
+                {'role': 'system', 'content': system}
+            ] + messages
+        
+        headers = {
+            'Authorization': f'Bearer {self._api_key}',
+            'Content-Type': 'application/json',
+        }
+        
+        try:
+            response = requests.post(
+                'https://api.githubcopilot.com/chat/completions',
+                json=payload,
+                headers=headers,
+                timeout=30,
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            return result['choices'][0]['message']['content'], {'input_tokens': 0, 'output_tokens': 0}
         except Exception as e:
-            # Fallback: use latin-1 which accepts all byte values
-            output = result.stdout.decode('latin-1', errors='replace').strip()
-
-        # Remove null bytes and control chars that cause issues downstream
-        output = ''.join(c for c in output if c not in '\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f')
-        # Return empty usage dict (Copilot CLI doesn't provide token counts, but interface is consistent)
-        return output, {'input_tokens': 0, 'output_tokens': 0}
+            return f'Copilot API error: {e}', {'error': True}
 
 
 # ─── Memory ───────────────────────────────────────────────────
 
 def load_memory():
     """Load persistent memory (things learned across sessions)."""
+    # Try new memory manager first
+    if MEMORY_MANAGER_AVAILABLE:
+        from memory_manager import migrate_from_json
+        migrate_from_json()  # One-time migration from old JSON
+
     if MEMORY_FILE.exists():
         with open(MEMORY_FILE) as f:
             data = json.load(f)
@@ -680,13 +725,31 @@ def load_memory():
 
 
 def save_memory(mem):
-    """Save persistent memory."""
+    """Save persistent memory to JSON (legacy) and new DB system."""
     with open(MEMORY_FILE, 'w') as f:
         json.dump(mem, f, indent=2)
+
+    # Also sync to new memory manager if available
+    if MEMORY_MANAGER_AVAILABLE:
+        for fact in mem.get('facts', []):
+            try:
+                save_memory_db(fact, type_='fact', tags=['fact'], source_session='legacy-sync')
+            except:
+                pass
 
 
 def memory_context(mem, compact=False):
     """Format memory into a string the model can reference. Compact mode for Haiku."""
+    # Try new memory manager first if available
+    if MEMORY_MANAGER_AVAILABLE:
+        try:
+            new_context = get_memory_context()
+            if new_context and not compact:
+                return new_context
+        except:
+            pass
+
+    # Fallback to legacy format
     parts = []
     if mem.get('credentials'):  # Credentials first (highest priority)
         creds = []
@@ -1353,9 +1416,20 @@ BEFORE FINISHING:
 DO NOT just exit. Always provide a clear summary of what was accomplished."""
 
 
-def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_message_history=None, verbose=False):
-    from ui_modal import init_ui
-    ui = init_ui()
+def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_message_history=None, verbose=False, tui_mode=False, stop_event=None):
+    if tui_mode:
+        # Running inside TUI — use a no-op UI so no termios/stdin.fileno() calls happen
+        class _NoopUI:
+            def show_command_prompt(self, cmd, options): return '\r'
+            def show_prompt(self, prompt_text, default=''): return ''
+            def show_steer_window(self, timeout_s=1.5): return ''
+            def show_status(self, *a, **kw): pass
+            def show_modal(self, *a, **kw): pass
+            def cleanup(self): pass
+        ui = _NoopUI()
+    else:
+        from ui_modal import init_ui
+        ui = init_ui()
 
     # Prompt for task if empty (after TUI initialized, so it appears cleanly)
     if not task and not resume_data:
@@ -1410,6 +1484,25 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
         if task and task != resume_data.get('task', ''):
             messages.append({'role': 'user', 'content': f'New follow-up task: {task}'})
         print(f'\n  {_DIM}↩ Resumed ({turn_count} previous turns, fresh shell){_RST}')
+        
+        # Display previous session summary (like Hermes' _display_resumed_history())
+        # This gives user visual confirmation of what was done before
+        if log:
+            print(f'\n  {_DIM}Previous execution summary:{_RST}')
+            # Show last 5 commands executed for context
+            last_cmds = [e for e in log if e.get('type') == 'exec'][-5:]
+            for i, event in enumerate(last_cmds, 1):
+                cmd = event.get('cmd', '<unknown>')
+                output = (event.get('output') or '').strip()
+                if output:
+                    # Show first line of output as preview
+                    out_preview = output.split('\n')[0][:70]
+                    if len(output.split('\n')[0]) > 70:
+                        out_preview += '…'
+                    print(f'    [{i}] {_DIM}{cmd[:60]}{_RST}')
+                    print(f'        → {_DIM}{out_preview}{_RST}')
+                else:
+                    print(f'    [{i}] {_DIM}{cmd[:60]}{_RST}')
     else:
         messages = []
         log = []
@@ -1419,37 +1512,38 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
     # Trigger periodic self-review every random 3-6 turns.
     next_review_turn = random.randint(3, 6)
 
-    # Startup header with Hermes-style Rich Panel
-    task_preview = task[:80] + ('…' if len(task) > 80 else '')
-    mem_summary = ''
-    if mem.get('networks') or mem.get('credentials'):
-        mem_summary = f"  {len(mem.get('networks', {}))} networks, {len(mem.get('credentials', {}))} creds"
+    # Startup header (suppress in TUI mode; TUI renders its own status/header)
+    if not tui_mode:
+        task_preview = task[:80] + ('…' if len(task) > 80 else '')
+        mem_summary = ''
+        if mem.get('networks') or mem.get('credentials'):
+            mem_summary = f"  {len(mem.get('networks', {}))} networks, {len(mem.get('credentials', {}))} creds"
 
-    if _RICH_AVAILABLE:
-        _rc = _RichConsole()
-        body = f"[dim]Task[/dim]  {task_preview}"
-        if mem_summary:
-            body += f"\n[dim]Memory[/dim]{mem_summary}"
-        _rc.print(_RichPanel(
-            body,
-            title=f"[bold #FFD700]⚕ Forest Gump[/bold #FFD700] [dim]{provider.name}[/dim]",
-            border_style="#CD7F32",
-            padding=(0, 1),
-        ))
-    else:
-        # Fallback for no Rich
-        print(f'\n {_GLD}⚕{_RST} {_BLD}Forest Gump{_RST}  {provider.name}')
-        print(f'  {_DIM}Task   {_RST}{task_preview}')
-        if mem_summary:
-            print(f'  {_DIM}Memory {_RST}{mem_summary}')
-        print()
+        if _RICH_AVAILABLE:
+            _rc = _RichConsole()
+            body = f"[dim]Task[/dim]  {task_preview}"
+            if mem_summary:
+                body += f"\n[dim]Memory[/dim]{mem_summary}"
+            _rc.print(_RichPanel(
+                body,
+                title=f"[bold #FFD700]⚕ Forest Gump[/bold #FFD700] [dim]{provider.name}[/dim]",
+                border_style="#CD7F32",
+                padding=(0, 1),
+            ))
+        else:
+            # Fallback for no Rich
+            print(f'\n {_GLD}⚕{_RST} {_BLD}Forest Gump{_RST}  {provider.name}')
+            print(f'  {_DIM}Task   {_RST}{task_preview}')
+            if mem_summary:
+                print(f'  {_DIM}Memory {_RST}{mem_summary}')
+            print()
 
     # Start persistent bottom bar
     _bar_state['mode'] = 'auto' if not confirm else 'manual'
     _bar_state['session_tok'] = 0
     _bar_state['turn'] = 0
     _bar_state['session_start_time'] = time.time()  # Track for 6-hour budget
-    _bar_setup()
+    _bar_setup(tui_mode=tui_mode)
 
     # Inject memory into first message if fresh start
     if not resume_data:
@@ -1470,6 +1564,9 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
         }
 
         for turn in range(1, max_turns + 1):
+            if stop_event and stop_event.is_set():
+                print('\n↯ Agent interrupted.')
+                break
             turn_count = turn
             _bar_update(turn=turn, action='')
 
@@ -1489,8 +1586,9 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
             # Reviews: adaptive frequency. Haiku only reviews on failure, less often.
             if turn >= next_review_turn:
                 review = build_round_review(turn, log, mem, task, is_haiku=is_haiku)
-                if review:
+                if review and not tui_mode:
                     print(f'  {_DIM}↺ Review{_RST}')
+                if review:
                     messages.append({'role': 'user', 'content': review})
                 # Haiku: longer intervals (only review failures, less often)
                 # Others: standard intervals
@@ -1502,7 +1600,8 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
             # ── LLM thinks ──
             t_llm_start = time.time()
             _spinner = Spinner()
-            _spinner.start()
+            if not tui_mode:
+                _spinner.start()
             try:
                 # Trim message history before sending to reduce token usage
                 # Keep full history in memory for logging; send only recent context to LLM
@@ -1518,9 +1617,9 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
                     print()
 
                 response, usage = provider.chat(trimmed_msgs, full_system)
-                _spinner.stop()
+                if not tui_mode: _spinner.stop()
             except Exception as e:
-                _spinner.stop()
+                if not tui_mode: _spinner.stop()
                 print(f'\n  {_RED}✗{_RST} Provider error: {e}')
                 break
             t_thought = time.time()
@@ -1547,10 +1646,13 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None, max_
                 tok_str = f" | {'/'.join(tok_parts)} tok"
             else:
                 tok_str = ''
-            print(f'\n{_GLD}⚕ Agent:{_RST} [llm={llm_inference}s{tok_str}]\n{response}')
+            if tui_mode:
+                print(response)
+            else:
+                print(f'\n{_GLD}⚕ Agent:{_RST} [llm={llm_inference}s{tok_str}]\n{response}')
 
             # Display running token dashboard
-            if usage:
+            if usage and not tui_mode:
                 print_token_dashboard(token_totals, turn, provider.name, log, is_haiku=is_haiku)
             messages.append({'role': 'assistant', 'content': response})
             log.append({'turn': turn, 'type': 'thought', 'content': response, 'tokens': usage, 'ts': t_thought, 'llm_s': llm_inference})
