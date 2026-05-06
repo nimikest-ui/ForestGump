@@ -260,19 +260,21 @@ class Shell:
 # ─── Model Providers ─────────────────────────────────────────
 
 class AnthropicProvider:
-    def __init__(self, model='claude-sonnet-4-20250514'):
+    def __init__(self, model='claude-haiku-4-5'):
         from anthropic import Anthropic
         self.client = Anthropic()
         self.model = model
         self.name = f'anthropic/{model}'
+        self._usage = None  # Track usage for cost analysis
 
     def chat(self, messages, system):
         r = self.client.messages.create(
             model=self.model,
-            max_tokens=4096,
-            system=system,
+            max_tokens=2048 if 'haiku' in self.model else 4096,  # Haiku needs fewer tokens
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             messages=messages,
         )
+        self._usage = r.usage  # Track for cost estimation
         return r.content[0].text
 
 
@@ -302,7 +304,7 @@ class OllamaProvider:
 class ClaudeCliProvider:
     """Uses the Claude Code CLI with OAuth (Pro subscription, no API key needed)."""
 
-    def __init__(self, model='sonnet'):
+    def __init__(self, model='haiku'):
         self.model = model
         self.name = f'claude-cli/{model}'
         self._history = []  # maintain conversation for context
@@ -746,8 +748,25 @@ def build_resume_message(resume_data, task, mem=None):
 
 # ─── Session Persistence ─────────────────────────────────────
 
-def save_session(task, provider_name, turn_count, messages, log, mem, session_id=None):
-    """Save full session state for resume."""
+def calculate_api_cost(model, input_tokens, output_tokens, cache_creation=0, cache_read=0):
+    """Calculate API cost based on model and token usage."""
+    pricing = {
+        'claude-haiku-4-5': {'input': 0.80, 'output': 4.00, 'cache_write': 1.0, 'cache_read': 0.08},
+        'claude-sonnet-4-20250514': {'input': 3.00, 'output': 15.00, 'cache_write': 3.75, 'cache_read': 0.30},
+        'claude-opus-4-1-20250805': {'input': 15.00, 'output': 75.00, 'cache_write': 18.75, 'cache_read': 1.50},
+        # Claude CLI/Copilot (approximate)
+        'sonnet': {'input': 3.00, 'output': 15.00, 'cache_write': 3.75, 'cache_read': 0.30},
+        'haiku': {'input': 0.80, 'output': 4.00, 'cache_write': 1.0, 'cache_read': 0.08},
+        'opus': {'input': 15.00, 'output': 75.00, 'cache_write': 18.75, 'cache_read': 1.50},
+    }
+    rates = pricing.get(model, pricing['claude-haiku-4-5'])  # Default to haiku rates
+    cost = (input_tokens * rates['input'] + output_tokens * rates['output'] +
+            cache_creation * rates['cache_write'] + cache_read * rates['cache_read']) / 1_000_000
+    return cost
+
+
+def save_session(task, provider_name, turn_count, messages, log, mem, session_id=None, cost_data=None):
+    """Save full session state for resume, including cost tracking."""
     SESSIONS_DIR.mkdir(exist_ok=True)
     ts = session_id or datetime.now().strftime('%Y%m%d_%H%M%S')
     session_file = SESSIONS_DIR / f'{ts}.json'
@@ -760,6 +779,7 @@ def save_session(task, provider_name, turn_count, messages, log, mem, session_id
             'log': log,
             'memory': mem,
             'timestamp': ts,
+            'cost': cost_data or {},  # Track API costs
         }, f, indent=2)
     return str(session_file)
 
@@ -1230,10 +1250,35 @@ def run_agent(provider, task, max_turns=50, confirm=True, resume_data=None):
     outcome = 'success' if turn_count > 0 else 'abandoned'
     extract_skills_from_session(messages, mem, session_id, provider, outcome=outcome)
 
+    # ── Calculate and display costs ──
+    cost_data = {}
+    if hasattr(provider, '_usage') and provider._usage:
+        input_tokens = provider._usage.input_tokens if hasattr(provider._usage, 'input_tokens') else 0
+        output_tokens = provider._usage.output_tokens if hasattr(provider._usage, 'output_tokens') else 0
+        cache_creation = provider._usage.cache_creation_input_tokens if hasattr(provider._usage, 'cache_creation_input_tokens') else 0
+        cache_read = provider._usage.cache_read_input_tokens if hasattr(provider._usage, 'cache_read_input_tokens') else 0
+
+        cost = calculate_api_cost(provider.model, input_tokens, output_tokens, cache_creation, cache_read)
+        cost_data = {
+            'input_tokens': input_tokens,
+            'output_tokens': output_tokens,
+            'cache_creation_tokens': cache_creation,
+            'cache_read_tokens': cache_read,
+            'estimated_cost_usd': round(cost, 4),
+            'cache_savings_usd': round((cache_read * 0.0000001 * 90), 4)  # ~90% savings on cached
+        }
+
     # ── Save session (for resume) ──
-    session_file = save_session(task, provider.name, turn_count, messages, log, mem, session_id)
+    session_file = save_session(task, provider.name, turn_count, messages, log, mem, session_id, cost_data)
     print(f'\n📝 Session saved: {session_file}')
     print(f'   Resume with: python agent.py --resume {session_file}')
+
+    if cost_data:
+        print(f'\n💰 Cost Summary:')
+        print(f'   Input: {cost_data.get("input_tokens", 0):,} tokens | Output: {cost_data.get("output_tokens", 0):,} tokens')
+        if cost_data.get('cache_read_tokens', 0) > 0:
+            print(f'   Cache hit: {cost_data.get("cache_read_tokens", 0):,} tokens (saved ${cost_data.get("cache_savings_usd", 0):.4f})')
+        print(f'   Estimated cost: ${cost_data.get("estimated_cost_usd", 0):.4f}')
     # Auto-extract learnings — runs silently after every session
     try:
         from extract_learnings import learn_from_session
@@ -1276,14 +1321,14 @@ def main():
 
     # Build provider
     if args.provider == 'claude':
-        provider = ClaudeCliProvider(args.model or 'sonnet')
+        provider = ClaudeCliProvider(args.model or 'haiku')
     elif args.provider == 'anthropic':
         if not os.environ.get('ANTHROPIC_API_KEY'):
             print('❌ Set ANTHROPIC_API_KEY environment variable.')
             sys.exit(1)
-        provider = AnthropicProvider(args.model or 'claude-sonnet-4-20250514')
+        provider = AnthropicProvider(args.model or 'claude-haiku-4-5')
     elif args.provider == 'copilot':
-        provider = CopilotProvider(args.model or 'claude-sonnet-4.5')
+        provider = CopilotProvider(args.model or 'claude-haiku-4.5')
     else:
         # Prefer local Ollama by default. Cloud is used if host is explicitly
         # set to ollama.com (or if host omitted but OLLAMA_API_KEY is present).

@@ -77,26 +77,28 @@ class MenuSystem:
                 'label': 'Claude Code CLI',
                 'desc': 'Claude via OAuth (Pro subscription)',
                 'models': {
-                    'sonnet': 'Claude Sonnet (default)',
-                    'opus': 'Claude 3 Opus',
+                    'haiku': 'Claude Haiku 4.5 💰 • Cheapest, great for CTFs',
+                    'sonnet': 'Claude Sonnet (balanced)',
+                    'opus': 'Claude 3 Opus (most capable)',
                 }
             },
             'anthropic': {
                 'label': 'Anthropic API',
                 'desc': 'Direct API (needs ANTHROPIC_API_KEY)',
                 'models': {
-                    'claude-sonnet-4-20250514': 'Claude Sonnet 4',
-                    'claude-opus-4-1-20250805': 'Claude 3 Opus',
+                    'claude-haiku-4-5': 'Claude Haiku 4.5 💰 • Cheapest (~70% savings)',
+                    'claude-sonnet-4-20250514': 'Claude Sonnet 4 (balanced)',
+                    'claude-opus-4-1-20250805': 'Claude 3 Opus (most capable)',
                 }
             },
             'copilot': {
                 'label': 'GitHub Copilot',
                 'desc': 'Copilot CLI — gh auth session, no API key needed',
                 'models': {
+                    'claude-haiku-4.5': 'Claude Haiku 4.5 💰 • Cheapest (~70% savings)',
                     'claude-sonnet-4.5': 'Claude Sonnet 4.5 \u2b50',
                     'claude-sonnet-4.6': 'Claude Sonnet 4.6',
                     'claude-sonnet-4': 'Claude Sonnet 4',
-                    'claude-haiku-4.5': 'Claude Haiku 4.5 • Fast',
                     'gpt-5.4': 'GPT-5.4',
                     'gpt-5.4-mini': 'GPT-5.4 Mini',
                     'gpt-5-mini': 'GPT-5 Mini',
